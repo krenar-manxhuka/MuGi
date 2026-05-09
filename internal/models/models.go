@@ -78,3 +78,13 @@ type LogEntry struct {
 	Message string    `json:"message"`
 	At      time.Time `json:"at"`
 }
+
+// ExecResult holds the output from compiling and testing a generated artifact.
+type ExecResult struct {
+	Lang     string // language detected from artifact files
+	BuildOK  bool
+	BuildOut string // combined stdout+stderr of build command
+	TestOK   bool
+	TestOut  string // combined stdout+stderr of test command
+	Skipped  bool   // true when the language has no executor
+}

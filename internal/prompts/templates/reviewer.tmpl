@@ -8,6 +8,15 @@ Task:
 Code artifact (revision {{ .Artifact.Revision }}):
 {{ .ArtifactJSON }}
 
+{{ if .ExecResult }}{{ if not .ExecResult.Skipped }}
+Build and test results:
+Build: {{ if .ExecResult.BuildOK }}✓ passed{{ else }}✗ FAILED{{ end }}
+{{ if .ExecResult.BuildOut }}{{ .ExecResult.BuildOut }}{{ end }}
+{{ if .ExecResult.BuildOK }}
+Tests: {{ if .ExecResult.TestOK }}✓ passed{{ else }}✗ FAILED{{ end }}
+{{ if .ExecResult.TestOut }}{{ .ExecResult.TestOut }}{{ end }}
+{{ end }}
+{{ end }}{{ end }}
 Evaluation criteria:
 - Correctness: does the code actually do what the task requires?
 - Completeness: are all plan steps addressed? Are edge cases handled?

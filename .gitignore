@@ -402,3 +402,4 @@ FodyWeavers.xsd
 
 # Claude Code session data
 *.claude/
+.env

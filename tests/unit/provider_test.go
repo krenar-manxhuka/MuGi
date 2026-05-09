@@ -82,7 +82,7 @@ func TestAnthropicProviderImplementsInterface(t *testing.T) {
 }
 
 func TestOpenAIProviderImplementsInterface(t *testing.T) {
-	var _ llm.Provider = llm.NewOpenAIProvider("", "key", "model")
+	var _ llm.Provider = llm.NewOpenAIProvider("", "key", "model", 0, 0)
 }
 
 func TestAnthropicProviderName(t *testing.T) {
@@ -93,7 +93,7 @@ func TestAnthropicProviderName(t *testing.T) {
 }
 
 func TestOpenAIProviderName(t *testing.T) {
-	p := llm.NewOpenAIProvider("", "key", "gpt-4o")
+	p := llm.NewOpenAIProvider("", "key", "gpt-4o", 0, 0)
 	if p.Name() != "openai/gpt-4o" {
 		t.Fatalf("unexpected name: %s", p.Name())
 	}

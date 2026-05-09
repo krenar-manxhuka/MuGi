@@ -31,6 +31,8 @@ import (
 )
 
 func main() {
+	loadDotEnv(".env")
+
 	taskFlag := flag.String("task", "", "task description to execute")
 	flag.Parse()
 
@@ -62,6 +64,8 @@ func main() {
 
 	orch := orchestrator.New(coord, plan, code, rev, orchestrator.Config{
 		MaxRevisions: cfg.MaxRevisions,
+		SkipReview:   cfg.SkipReview,
+		RunTests:     cfg.RunTests,
 		Logger:       logger,
 	})
 
@@ -191,4 +195,33 @@ func writeFile(path string, data func() ([]byte, error)) error {
 		return err
 	}
 	return os.WriteFile(path, b, 0o644)
+}
+
+// loadDotEnv reads key=value pairs from a .env file and sets them as
+// environment variables, skipping blank lines, comments, and any key that is
+// already set in the environment.
+func loadDotEnv(path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return // no .env is fine
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || os.Getenv(key) != "" {
+			continue // already set — real env takes priority
+		}
+		os.Setenv(key, value)
+	}
 }

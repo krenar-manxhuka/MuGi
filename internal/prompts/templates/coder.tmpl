@@ -18,10 +18,10 @@ Address every issue listed above before submitting the revised implementation.
 {{ end }}
 
 Rules:
-- Produce all files needed for the implementation to work (source, config, tests, etc.).
-- Write idiomatic, production-quality code with meaningful names.
-- Do not add placeholder comments like "TODO: implement this".
-- Include at least one test file if the language supports it.
+- Produce the minimum files needed: typically one main source file and one test file.
+- Write idiomatic, working code. No placeholder comments, no TODOs, no commented-out code.
+- Every test function must contain real assertions, not commented-out stubs.
+- Keep each file under 80 lines. Prefer simple, focused implementations over exhaustive ones.
 - File paths should be relative to the project root.
 
 Respond with a single JSON object matching this schema exactly. Output ONLY valid JSON — no markdown fences, no explanation.

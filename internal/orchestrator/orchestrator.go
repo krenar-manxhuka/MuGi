@@ -10,6 +10,7 @@ import (
 
 	"mugi/internal/agents"
 	"mugi/internal/models"
+	"mugi/internal/runner"
 	"mugi/internal/state"
 )
 
@@ -22,6 +23,8 @@ type Orchestrator struct {
 	coder       agents.Agent
 	reviewer    agents.Agent
 	maxIter     int
+	skipReview  bool
+	runTests    bool
 	log         *slog.Logger
 }
 
@@ -31,6 +34,13 @@ type Config struct {
 	// When this limit is reached the latest artifact is accepted regardless of
 	// review outcome.
 	MaxRevisions int
+
+	// SkipReview accepts the coder's first output without running the reviewer.
+	// Useful on slow or memory-constrained hardware.
+	SkipReview bool
+
+	// RunTests runs go build + go test on the coder's output before the reviewer sees it.
+	RunTests bool
 
 	// Logger is optional; a default text logger is used when nil.
 	Logger *slog.Logger
@@ -54,6 +64,8 @@ func New(
 		coder:       coder,
 		reviewer:    reviewer,
 		maxIter:     cfg.MaxRevisions,
+		skipReview:  cfg.SkipReview,
+		runTests:    cfg.RunTests,
 		log:         logger,
 	}
 }
@@ -86,13 +98,37 @@ func (o *Orchestrator) Run(ctx context.Context, task *models.Task) (*state.Workf
 	// ── Phase 3: Coder + Reviewer loop ────────────────────────────────────────
 	for {
 		if err := o.run(ctx, o.coder, st, "code"); err != nil {
+			if st.GetArtifact() != nil {
+				// A previous revision exists — accept it rather than failing.
+				o.log.Warn("coder failed on revision; accepting last successful artifact", "err", err)
+				st.AddLog("orchestrator", "coder error on this revision — keeping prior artifact")
+				break
+			}
 			st.MarkFailed(err)
 			return st, err
 		}
 
+		if o.runTests {
+			res := runner.Run(ctx, st.GetArtifact(), 90*time.Second)
+			st.SetExecResult(res)
+			if res.Skipped {
+				o.log.Info("executor skipped", "lang", res.Lang)
+			} else {
+				o.log.Info("executor done", "build_ok", res.BuildOK, "test_ok", res.TestOK)
+			}
+		}
+
+		if o.skipReview {
+			o.log.Info("review skipped (SKIP_REVIEW=true)")
+			st.AddLog("orchestrator", "review skipped — accepting coder output as-is")
+			break
+		}
+
 		if err := o.run(ctx, o.reviewer, st, "review"); err != nil {
-			st.MarkFailed(err)
-			return st, err
+			// Reviewer produced malformed output — accept the current artifact.
+			o.log.Warn("reviewer failed; accepting current artifact", "err", err)
+			st.AddLog("orchestrator", "reviewer error — accepting current artifact as-is")
+			break
 		}
 
 		review := st.LatestReview()

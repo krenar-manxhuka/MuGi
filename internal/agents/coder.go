@@ -77,7 +77,7 @@ func (c *Coder) Process(ctx context.Context, st *state.WorkflowState) error {
 	resp, err := c.provider.Generate(ctx, llm.Request{
 		SystemPrompt: sysPrompt,
 		Messages:     []llm.Message{{Role: "user", Content: userMsg}},
-		MaxTokens:    8192,
+		MaxTokens:    4096,
 		Temperature:  0.1,
 	})
 	if err != nil {
@@ -87,7 +87,11 @@ func (c *Coder) Process(ctx context.Context, st *state.WorkflowState) error {
 	raw := extractJSON(resp.Content)
 	var artifact models.Artifact
 	if err := json.Unmarshal([]byte(raw), &artifact); err != nil {
-		return fmt.Errorf("coder: parse artifact JSON: %w\nraw response:\n%s", err, resp.Content)
+		preview := resp.Content
+		if len(preview) > 300 {
+			preview = preview[:300] + "…"
+		}
+		return fmt.Errorf("coder: parse artifact JSON: %w\nraw response (truncated):\n%s", err, preview)
 	}
 
 	st.SetArtifact(&artifact)

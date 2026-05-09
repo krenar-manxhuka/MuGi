@@ -4,6 +4,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 )
 
 // Config holds all tunable settings. Every field has a sensible default so the
@@ -17,6 +18,14 @@ type Config struct {
 
 	// MAX_REVISIONS caps the coder→reviewer loop.
 	MaxRevisions int
+
+	// SKIP_REVIEW skips the reviewer agent entirely; the coder's first output
+	// is accepted as-is. Useful on slow hardware.
+	SkipReview bool
+
+	// RUN_TESTS runs go build + go test on the coder's output before the reviewer sees it.
+	// Requires Go toolchain on PATH. Default: true.
+	RunTests bool
 
 	// OUTPUT_DIR is where artifact files are written after the workflow.
 	OutputDir string
@@ -32,6 +41,8 @@ func Load() Config {
 		Provider:     getEnv("LLM_PROVIDER", "mock"),
 		Model:        getEnv("LLM_MODEL", ""),
 		MaxRevisions: getEnvInt("MAX_REVISIONS", 3),
+		SkipReview:   getEnvBool("SKIP_REVIEW", false),
+		RunTests:     getEnvBool("RUN_TESTS", true),
 		OutputDir:    getEnv("OUTPUT_DIR", "output"),
 		PromptsDir:   getEnv("PROMPTS_DIR", "prompts"),
 	}
@@ -49,6 +60,17 @@ func getEnvInt(key string, fallback int) int {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
 		}
+	}
+	return fallback
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	switch v {
+	case "true", "1", "yes":
+		return true
+	case "false", "0", "no":
+		return false
 	}
 	return fallback
 }

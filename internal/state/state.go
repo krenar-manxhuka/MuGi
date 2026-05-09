@@ -13,11 +13,12 @@ import (
 type WorkflowState struct {
 	mu sync.RWMutex
 
-	Task      *models.Task
-	Plan      *models.Plan
-	Artifact  *models.Artifact
-	Reviews   []*models.Review
-	Status    models.WorkflowStatus
+	Task       *models.Task
+	Plan       *models.Plan
+	Artifact   *models.Artifact
+	Reviews    []*models.Review
+	ExecResult *models.ExecResult
+	Status     models.WorkflowStatus
 	Iteration int
 	MaxIter   int
 	Log       []models.LogEntry
@@ -102,6 +103,20 @@ func (s *WorkflowState) AllReviews() []*models.Review {
 	out := make([]*models.Review, len(s.Reviews))
 	copy(out, s.Reviews)
 	return out
+}
+
+// --- exec result ---
+
+func (s *WorkflowState) SetExecResult(r *models.ExecResult) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ExecResult = r
+}
+
+func (s *WorkflowState) GetExecResult() *models.ExecResult {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ExecResult
 }
 
 // --- iteration ---

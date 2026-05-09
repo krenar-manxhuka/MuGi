@@ -30,6 +30,7 @@ type reviewerData struct {
 	Task         *models.Task
 	Artifact     *models.Artifact
 	ArtifactJSON string
+	ExecResult   *models.ExecResult
 }
 
 func (r *Reviewer) Process(ctx context.Context, st *state.WorkflowState) error {
@@ -49,6 +50,7 @@ func (r *Reviewer) Process(ctx context.Context, st *state.WorkflowState) error {
 		Task:         st.Task,
 		Artifact:     artifact,
 		ArtifactJSON: string(artifactBytes),
+		ExecResult:   st.GetExecResult(),
 	}
 
 	sysPrompt, err := r.loader.Render("reviewer", data)
@@ -71,7 +73,11 @@ func (r *Reviewer) Process(ctx context.Context, st *state.WorkflowState) error {
 	raw := extractJSON(resp.Content)
 	var review models.Review
 	if err := json.Unmarshal([]byte(raw), &review); err != nil {
-		return fmt.Errorf("reviewer: parse review JSON: %w\nraw response:\n%s", err, resp.Content)
+		preview := resp.Content
+		if len(preview) > 300 {
+			preview = preview[:300] + "…"
+		}
+		return fmt.Errorf("reviewer: parse review JSON: %w\nraw response (truncated):\n%s", err, preview)
 	}
 
 	st.AddReview(&review)

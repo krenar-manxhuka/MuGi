@@ -21,20 +21,27 @@ type OpenAIProvider struct {
 	baseURL string
 	apiKey  string
 	model   string
+	numCtx  int // passed as num_ctx in the request body (Ollama extension; ignored by others)
 	client  *http.Client
 }
 
 // NewOpenAIProvider returns an OpenAI-compatible provider.
 // baseURL defaults to https://api.openai.com/v1 when empty.
-func NewOpenAIProvider(baseURL, apiKey, model string) *OpenAIProvider {
+// timeout of 0 uses the default of 120 seconds.
+// numCtx sets the context window size via num_ctx (Ollama extension; ignored by real OpenAI).
+func NewOpenAIProvider(baseURL, apiKey, model string, timeout time.Duration, numCtx int) *OpenAIProvider {
 	if baseURL == "" {
 		baseURL = "https://api.openai.com/v1"
+	}
+	if timeout == 0 {
+		timeout = 120 * time.Second
 	}
 	return &OpenAIProvider{
 		baseURL: baseURL,
 		apiKey:  apiKey,
 		model:   model,
-		client:  &http.Client{Timeout: 120 * time.Second},
+		numCtx:  numCtx,
+		client:  &http.Client{Timeout: timeout},
 	}
 }
 
@@ -43,10 +50,12 @@ func (p *OpenAIProvider) Name() string { return "openai/" + p.model }
 // --- wire types ---
 
 type openAIReq struct {
-	Model       string       `json:"model"`
-	Messages    []openAIMsg  `json:"messages"`
-	MaxTokens   int          `json:"max_tokens,omitempty"`
-	Temperature float64      `json:"temperature,omitempty"`
+	Model       string      `json:"model"`
+	Messages    []openAIMsg `json:"messages"`
+	MaxTokens   int         `json:"max_tokens,omitempty"`
+	Temperature float64     `json:"temperature,omitempty"`
+	Stream      bool        `json:"stream"`          // always false; prevents chunked stalls
+	NumCtx      int         `json:"num_ctx,omitempty"` // Ollama extension: context window size
 }
 
 type openAIMsg struct {
@@ -90,6 +99,7 @@ func (p *OpenAIProvider) Generate(ctx context.Context, req Request) (Response, e
 		Messages:    msgs,
 		MaxTokens:   maxTok,
 		Temperature: req.Temperature,
+		NumCtx:      p.numCtx,
 	})
 	if err != nil {
 		return Response{}, fmt.Errorf("openai: marshal request: %w", err)
