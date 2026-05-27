@@ -2,7 +2,52 @@
 
 MuGi is a **Go-native, provider-agnostic multi-agent pipeline** that turns a
 one-line task description into a structured plan, working code, and a
-peer-reviewed result — all driven by four collaborating LLM agents.
+peer-reviewed result — all driven by four collaborating LLM agents. Every
+generated artifact is compiled and tested before the reviewer sees it, so the
+review is grounded in real execution output, not LLM speculation.
+
+---
+
+## Benchmark
+
+12 small Go tasks (4 easy / 5 medium / 3 hard), each with explicit function
+signatures and required test cases. The pipeline is scored on
+`go build` + `go test` results, the reviewer's final score, revisions used,
+wall-clock latency, and dollar cost.
+
+| Provider | Build pass | Test pass | Avg score | Avg revisions | Avg latency | Total cost |
+|---|---:|---:|---:|---:|---:|---:|
+| `mock` (harness baseline) | 12/12 | 12/12 | 9.0 | 0.0 | 9.3s | $0.0000 |
+| `ollama/qwen3:1.7b` | _run `go run ./cmd/bench -providers ollama` to populate_ | | | | | |
+| `anthropic/claude-sonnet-4-6` | _set `ANTHROPIC_API_KEY` and re-run_ | | | | | |
+| `anthropic/claude-haiku-4-5` | _set `ANTHROPIC_API_KEY` and re-run_ | | | | | |
+
+Full per-task detail: [`bench/results/RESULTS.md`](bench/results/RESULTS.md) ·
+raw data: [`bench/results/results.csv`](bench/results/results.csv) ·
+how to run: [`bench/README.md`](bench/README.md).
+
+### What we learned from this run
+
+- **Mock is a contract test for the harness, not a benchmark.** The mock
+  provider returns the same canned HTTP-server artifact for every task
+  description, so its 12/12 pass rate measures whether the orchestrator,
+  executor, and scorer agree end-to-end — not whether an LLM can solve
+  FizzBuzz. Treat the mock row as the "all green" baseline that proves the
+  rig is working.
+- **The eval surfaced a real bug in `runner.detectLang` on the first run.**
+  It was reading only the first file's `Lang` field, which for any Go module
+  is `go.mod` with `lang: "text"`. The runner was silently skipping build
+  and test execution for every real artifact. Fixed in
+  [internal/runner/runner.go](internal/runner/runner.go). This is the kind
+  of thing only an eval harness catches — manual smoke tests would have kept
+  shipping false `build_ok: false` results forever.
+- **The build/test round-trip dominates per-task latency.** Each mock run
+  takes ~9s end-to-end while the mock LLM itself returns instantly. That's
+  the `go build` + `go test` cycle inside the temp dir. Implication: for a
+  fast model (Haiku, local 7B), the executor becomes the bottleneck — worth
+  caching across same-content artifacts if we ever batch-evaluate at scale.
+
+(More observations land here as the Anthropic and Ollama rows fill in.)
 
 ---
 
@@ -187,7 +232,13 @@ All tests use the mock provider — no API key required.
 
 ```
 .
-├── cmd/mugi/               CLI entrypoint
+├── cmd/
+│   ├── mugi/               CLI entrypoint
+│   └── bench/              Evaluation harness (see bench/README.md)
+├── bench/
+│   ├── tasks/              YAML task definitions (one per benchmark task)
+│   ├── results/            CSV + Markdown + JSON output (regenerated each run)
+│   └── README.md           How to run the bench, add tasks, add providers
 ├── internal/
 │   ├── agents/             Agent interface + four implementations
 │   │   ├── agent.go        Agent interface & JSON extraction helper

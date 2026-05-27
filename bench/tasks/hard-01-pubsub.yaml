@@ -1,0 +1,40 @@
+id: hard-01-pubsub
+name: In-Memory Pub/Sub with Per-Subscriber Buffer
+tier: hard
+description: |
+  Implement an in-memory publish/subscribe broker in Go with
+  bounded per-subscriber buffers.
+
+  Required structure:
+  - Module name: example.com/pubsub
+  - File `pubsub.go` exporting:
+      type Broker[T any] struct { /* unexported */ }
+      func New[T any](bufferSize int) *Broker[T]
+      func (b *Broker[T]) Subscribe() (ch <-chan T, unsubscribe func())
+      func (b *Broker[T]) Publish(msg T)
+      func (b *Broker[T]) Close()
+    Semantics:
+      - Subscribe returns a receive channel buffered at `bufferSize`
+        and an idempotent unsubscribe function that closes the
+        channel and removes the subscription.
+      - Publish delivers msg to every current subscriber. If a
+        subscriber's channel is full, Publish drops the message for
+        THAT subscriber only — it must NOT block other subscribers
+        or the publisher.
+      - Close unsubscribes everyone (closes all channels) and makes
+        subsequent Publish calls no-ops.
+      - Safe for concurrent Publish / Subscribe / unsubscribe / Close
+        from many goroutines. No data races (`go test -race` must pass).
+  - File `pubsub_test.go` with tests covering:
+      * One publisher, two subscribers each receive the same message.
+      * Slow subscriber drops messages without blocking a fast one.
+      * Unsubscribe closes the channel; subsequent reads return
+        the zero value with ok=false.
+      * Close closes all subscriber channels.
+      * Concurrent stress test (e.g., 10 subscribers, 1000 publishes
+        from 4 goroutines) completes without deadlock.
+    Add `-race` is not required by the harness, but the implementation
+    must be race-free by design (use sync primitives, not raw shared maps).
+  - File `go.mod` declaring module example.com/pubsub, go 1.21.
+
+  Standard library only. Must build and pass `go test ./...`.

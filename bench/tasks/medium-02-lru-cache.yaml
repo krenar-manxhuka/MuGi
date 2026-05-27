@@ -1,0 +1,32 @@
+id: medium-02-lru-cache
+name: LRU Cache
+tier: medium
+description: |
+  Implement a generic LRU (least-recently-used) cache in Go.
+
+  Required structure:
+  - Module name: example.com/lru
+  - File `lru.go` exporting:
+      type Cache[K comparable, V any] struct { /* unexported */ }
+      func New[K comparable, V any](capacity int) *Cache[K, V]
+      func (c *Cache[K, V]) Get(key K) (V, bool)
+      func (c *Cache[K, V]) Put(key K, value V)
+      func (c *Cache[K, V]) Len() int
+    Semantics:
+      - Capacity must be > 0; New panics with a clear message if not.
+      - Put updates the value for an existing key and marks it as
+        most-recently-used.
+      - When at capacity, Put evicts the least-recently-used key.
+      - Get returns (value, true) on hit and marks it MRU; on miss
+        returns the zero value of V and false.
+      - O(1) average for Get and Put. (Use a doubly linked list +
+        map.) Concurrent safety NOT required.
+  - File `lru_test.go` with tests covering:
+      * Basic put/get round-trip.
+      * Eviction order: after Put a,b,c with capacity=2, Get(a)
+        returns false; Put a,b then Get(a) then Put(c) must evict b.
+      * Update-in-place does not change capacity.
+      * Len() reflects current size.
+  - File `go.mod` declaring module example.com/lru, go 1.21.
+
+  Standard library only. Must build and pass `go test ./...`.

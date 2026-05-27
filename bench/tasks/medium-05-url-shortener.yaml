@@ -1,0 +1,33 @@
+id: medium-05-url-shortener
+name: In-Memory URL Shortener
+tier: medium
+description: |
+  Implement a Go package that provides an in-memory URL shortener.
+
+  Required structure:
+  - Module name: example.com/shorten
+  - File `shorten.go` exporting:
+      type Store struct { /* unexported */ }
+      func NewStore() *Store
+      func (s *Store) Shorten(longURL string) (code string, err error)
+      func (s *Store) Resolve(code string) (longURL string, ok bool)
+    Semantics:
+      - Shorten returns a 6-character base62 code [0-9A-Za-z].
+      - The same long URL passed twice must return the SAME code
+        (idempotent). Different URLs get different codes.
+      - Resolve returns the original URL and true on hit; "", false
+        on miss.
+      - Shorten returns a non-nil error on empty input.
+      - Safe for concurrent use.
+  - File `shorten_test.go` with tests covering:
+      * Round-trip: Shorten then Resolve returns the original.
+      * Idempotency: Shorten(same URL) twice returns the same code.
+      * Distinctness: Shorten of two different URLs returns two
+        different codes.
+      * Resolve("missing") returns "", false.
+      * Shorten("") returns a non-nil error.
+      * 100 concurrent Shorten calls on distinct URLs all succeed
+        and all codes round-trip.
+  - File `go.mod` declaring module example.com/shorten, go 1.21.
+
+  Standard library only. Must build and pass `go test ./...`.

@@ -1,0 +1,13 @@
+task_id,tier,task_name,provider,build_ok,tests_present,test_ok,reviewer_score,approved,revisions_used,duration_ms,input_tokens,output_tokens,llm_calls,cost_usd,error
+easy-01-fizzbuzz,easy,FizzBuzz,mock,true,true,true,9,true,0,9526,600,1750,5,0.000000,
+easy-02-string-reverse,easy,Unicode-Safe String Reverse,mock,true,true,true,9,true,0,9219,600,1750,5,0.000000,
+easy-03-fibonacci,easy,Memoized Fibonacci,mock,true,true,true,9,true,0,9202,600,1750,5,0.000000,
+easy-04-http-health,easy,HTTP Health Endpoint,mock,true,true,true,9,true,0,9315,600,1750,5,0.000000,
+hard-01-pubsub,hard,In-Memory Pub/Sub with Per-Subscriber Buffer,mock,true,true,true,9,true,0,9178,600,1750,5,0.000000,
+hard-02-worker-pool,hard,Worker Pool with Graceful Shutdown,mock,true,true,true,9,true,0,9292,600,1750,5,0.000000,
+hard-03-expr-eval,hard,Arithmetic Expression Evaluator,mock,true,true,true,9,true,0,9342,600,1750,5,0.000000,
+medium-01-rate-limiter,medium,Token-Bucket Rate Limiter,mock,true,true,true,9,true,0,9114,600,1750,5,0.000000,
+medium-02-lru-cache,medium,LRU Cache,mock,true,true,true,9,true,0,9413,600,1750,5,0.000000,
+medium-03-json-config,medium,JSON Config Loader with Defaults,mock,true,true,true,9,true,0,9557,600,1750,5,0.000000,
+medium-04-csv-to-json,medium,CSV-to-JSON Converter,mock,true,true,true,9,true,0,9681,600,1750,5,0.000000,
+medium-05-url-shortener,medium,In-Memory URL Shortener,mock,true,true,true,9,true,0,8895,600,1750,5,0.000000,

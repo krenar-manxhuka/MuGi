@@ -401,5 +401,16 @@ FodyWeavers.xsd
 *.sln.iml
 
 # Claude Code session data
-*.claude/
+.claude/
+
+# Local environment — never commit real API keys
 .env
+
+# Go build output
+mugi
+mugi.exe
+coverage.out
+coverage.html
+
+# Artifact output directory
+output/

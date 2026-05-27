@@ -1,0 +1,19 @@
+id: easy-03-fibonacci
+name: Memoized Fibonacci
+tier: easy
+description: |
+  Write a Go package that computes Fibonacci numbers with memoization.
+
+  Required structure:
+  - Module name: example.com/fib
+  - File `fib.go` exporting:
+      `func Fib(n int) uint64` — returns the nth Fibonacci number
+      (Fib(0)=0, Fib(1)=1, Fib(2)=1, Fib(10)=55, Fib(50)=12586269025).
+      For n < 0 the function must return 0.
+    Use memoization so that repeated calls share work. Concurrent
+    safety is NOT required.
+  - File `fib_test.go` with table-driven tests covering at least
+    n = -1, 0, 1, 2, 10, 20, 50.
+  - File `go.mod` declaring module example.com/fib, go 1.21.
+
+  No external dependencies. Must build and pass `go test ./...`.

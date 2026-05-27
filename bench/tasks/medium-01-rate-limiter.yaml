@@ -1,0 +1,31 @@
+id: medium-01-rate-limiter
+name: Token-Bucket Rate Limiter
+tier: medium
+description: |
+  Implement a token-bucket rate limiter in Go.
+
+  Required structure:
+  - Module name: example.com/ratelimit
+  - File `ratelimit.go` exporting:
+      type Limiter struct { /* unexported fields */ }
+      func New(capacity int, refillPerSecond float64) *Limiter
+      func (l *Limiter) Allow() bool
+    Semantics:
+      - Bucket starts full (`capacity` tokens).
+      - Allow() consumes one token if available and returns true;
+        otherwise returns false without blocking.
+      - Tokens refill continuously at `refillPerSecond` per second,
+        capped at `capacity`.
+      - Must be safe for concurrent use from multiple goroutines.
+  - File `ratelimit_test.go` with tests covering:
+      * A fresh limiter with capacity=3 allows exactly 3 Allow()
+        calls before returning false.
+      * After waiting long enough for at least 1 refill at
+        refillPerSecond=10, a 4th call eventually succeeds. Use
+        time.Sleep with a margin; do not assert exact timing.
+      * Concurrent access from 50 goroutines never panics and the
+        total successful Allow() count is bounded by capacity plus
+        the number of refills that elapsed.
+  - File `go.mod` declaring module example.com/ratelimit, go 1.21.
+
+  Standard library only. Must build and pass `go test ./...`.

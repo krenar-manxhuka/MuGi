@@ -1,0 +1,50 @@
+id: hard-02-worker-pool
+name: Worker Pool with Graceful Shutdown
+tier: hard
+description: |
+  Implement a fixed-size worker pool in Go that processes Job values
+  from a queue, returns results, and shuts down gracefully.
+
+  Required structure:
+  - Module name: example.com/pool
+  - File `pool.go` exporting:
+      type Job func(ctx context.Context) (any, error)
+      type Result struct {
+        Value any
+        Err   error
+      }
+      type Pool struct { /* unexported */ }
+      func New(workers int, queueSize int) *Pool
+      func (p *Pool) Submit(job Job) (<-chan Result, error)
+      func (p *Pool) Shutdown(ctx context.Context) error
+    Semantics:
+      - On New, `workers` goroutines start and consume from a job
+        queue of capacity `queueSize`.
+      - Submit enqueues a job and returns a 1-buffered channel that
+        will receive exactly one Result, then close. Returns a
+        non-nil error if the pool has been shut down.
+      - Each worker calls job(ctx) where ctx is the pool's lifecycle
+        context. If the pool is shutting down, ctx is cancelled and
+        in-flight jobs see ctx.Err().
+      - Shutdown:
+          1. Stop accepting new jobs (subsequent Submit returns error).
+          2. Drain in-flight jobs OR wait for the supplied ctx to
+             cancel, whichever comes first.
+          3. Cancel the pool ctx, wait for workers to exit, return
+             nil on clean drain or ctx.Err() if the deadline hit.
+      - Calling Shutdown twice is safe and the second call is a no-op
+        returning nil.
+      - No goroutine leaks (`runtime.NumGoroutine` should return to
+        baseline after Shutdown).
+  - File `pool_test.go` with tests covering:
+      * Submit N jobs, receive all N results, each Result correct.
+      * Submit after Shutdown returns a non-nil error.
+      * Shutdown with a 0-deadline ctx returns ctx.Err() if there
+        are still in-flight jobs that ignore cancellation.
+      * Shutdown with ample deadline returns nil and all in-flight
+        jobs observe ctx.Err() when the pool is cancelled.
+      * No goroutine leak: capture runtime.NumGoroutine before and
+        after a full Submit/Shutdown cycle; allow a small slack.
+  - File `go.mod` declaring module example.com/pool, go 1.21.
+
+  Standard library only. Must build and pass `go test ./...`.

@@ -31,7 +31,16 @@ func Run(ctx context.Context, artifact *models.Artifact, timeout time.Duration) 
 	}
 }
 
+// detectLang returns the language to execute the artifact as.
+// Returns "go" if any file is a Go source file (lang or .go extension),
+// since config files like go.mod often appear first with lang="text".
+// Otherwise falls back to the first non-empty Lang.
 func detectLang(files []models.File) string {
+	for _, f := range files {
+		if strings.EqualFold(f.Lang, "go") || strings.HasSuffix(f.Path, ".go") {
+			return "go"
+		}
+	}
 	for _, f := range files {
 		if f.Lang != "" {
 			return strings.ToLower(f.Lang)

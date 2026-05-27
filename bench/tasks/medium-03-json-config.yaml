@@ -1,0 +1,39 @@
+id: medium-03-json-config
+name: JSON Config Loader with Defaults
+tier: medium
+description: |
+  Implement a small Go package that loads a JSON configuration file
+  into a struct and applies defaults for missing fields.
+
+  Required structure:
+  - Module name: example.com/cfgload
+  - File `cfgload.go` exporting:
+      type Config struct {
+        Host        string        `json:"host"`
+        Port        int           `json:"port"`
+        Timeout     time.Duration `json:"timeout"`
+        FeatureFlag bool          `json:"feature_flag"`
+      }
+      func Load(path string) (*Config, error)
+    Semantics:
+      - Reads the file at `path`, parses as JSON, unmarshals into Config.
+      - After unmarshalling, applies these defaults to any field still
+        at its zero value:
+          Host    = "localhost"
+          Port    = 8080
+          Timeout = 30 * time.Second
+        (FeatureFlag has no default; its zero value is fine.)
+      - `timeout` in JSON is encoded as a Go duration string
+        ("30s", "1m"). Implement custom unmarshalling if needed.
+      - Returns a clear error if the file does not exist or contains
+        invalid JSON.
+  - File `cfgload_test.go` with tests covering:
+      * Loading a fully-specified config returns it unchanged.
+      * Loading {} returns defaults for Host, Port, Timeout.
+      * Loading a non-existent file returns a non-nil error.
+      * Loading {"port":-1} preserves the explicit value (no default
+        substitution because -1 is non-zero).
+    Use t.TempDir() for fixture files.
+  - File `go.mod` declaring module example.com/cfgload, go 1.21.
+
+  Standard library only. Must build and pass `go test ./...`.

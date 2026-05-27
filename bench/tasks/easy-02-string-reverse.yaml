@@ -1,0 +1,21 @@
+id: easy-02-string-reverse
+name: Unicode-Safe String Reverse
+tier: easy
+description: |
+  Write a Go package that reverses a string by runes (not bytes), so
+  it works correctly on multi-byte UTF-8 input.
+
+  Required structure:
+  - Module name: example.com/revstr
+  - File `revstr.go` exporting `func Reverse(s string) string`. The
+    function must reverse by runes; reversing "héllo" must produce
+    "olléh", not a mojibake byte-reversed string.
+  - File `revstr_test.go` with table-driven tests covering at least:
+      "" -> ""
+      "a" -> "a"
+      "abc" -> "cba"
+      "héllo" -> "olléh"
+      "日本語" -> "語本日"
+  - File `go.mod` declaring module example.com/revstr, go 1.21.
+
+  No external dependencies. Must build and pass `go test ./...`.

@@ -1,0 +1,22 @@
+id: easy-01-fizzbuzz
+name: FizzBuzz
+tier: easy
+description: |
+  Write a Go package that implements FizzBuzz.
+
+  Required structure:
+  - Module name: example.com/fizzbuzz
+  - File `fizzbuzz.go` exporting `func FizzBuzz(n int) []string` that
+    returns a slice of length n where index i represents number i+1:
+      multiples of 3 -> "Fizz"
+      multiples of 5 -> "Buzz"
+      multiples of 15 -> "FizzBuzz"
+      otherwise -> the decimal string of the number
+  - File `fizzbuzz_test.go` with table-driven tests verifying:
+      n=15 produces ["1","2","Fizz","4","Buzz","Fizz","7","8","Fizz","Buzz","11","Fizz","13","14","FizzBuzz"]
+      n=0 produces an empty slice
+      n=1 produces ["1"]
+  - File `go.mod` declaring module example.com/fizzbuzz, go 1.21.
+
+  No external dependencies. The code must build with `go build ./...`
+  and pass `go test ./...`.
