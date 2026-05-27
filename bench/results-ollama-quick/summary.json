@@ -15,7 +15,7 @@
     "output_tokens": 4091,
     "llm_calls": 5,
     "cost_usd": 0,
-    "build_out": "[go mod tidy]\nok\nfound packages example (fizzbuzz.go) and fizzbuzz (fizzbuzz_test.go) in C:\\Users\\REDACTED\\AppData\\Local\\Temp\\mugi-run-3223884777\\example.com\\fizzbuzz"
+    "build_out": "[go mod tidy]\nok\nfound packages example (fizzbuzz.go) and fizzbuzz (fizzbuzz_test.go) in <tmpdir>/mugi-run-3223884777/example.com/fizzbuzz"
   },
   {
     "task_id": "hard-01-pubsub",
