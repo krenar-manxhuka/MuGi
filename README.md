@@ -22,6 +22,15 @@ wall-clock latency, and dollar cost.
 | `anthropic/claude-sonnet-4-6` | _set `ANTHROPIC_API_KEY` and re-run_ | | | | | |
 | `anthropic/claude-haiku-4-5` | _set `ANTHROPIC_API_KEY` and re-run_ | | | | | |
 
+> **Why the real-model rows are empty:** the Anthropic and Ollama rows were
+> not populated for this release due to resource constraints — running the
+> paid Anthropic models across all 12 tasks would have incurred non-trivial
+> API cost, and a full Ollama sweep needs more local GPU/RAM headroom than
+> was available. A partial Ollama smoke run (3 tasks, `qwen3:1.7b`) lives in
+> [`bench/results-ollama-quick/`](bench/results-ollama-quick/RESULTS.md) for
+> reference. The harness itself is the deliverable; the rows fill in for
+> whoever runs it next with their own keys or hardware.
+
 Full per-task detail: [`bench/results/RESULTS.md`](bench/results/RESULTS.md) ·
 raw data: [`bench/results/results.csv`](bench/results/results.csv) ·
 how to run: [`bench/README.md`](bench/README.md).
