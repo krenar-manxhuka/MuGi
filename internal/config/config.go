@@ -19,6 +19,10 @@ type Config struct {
 	// MAX_REVISIONS caps the coder→reviewer loop.
 	MaxRevisions int
 
+	// MAX_LLM_CALLS is a hard ceiling on LLM calls per run — a defence-in-depth
+	// cost guardrail independent of the revision loop. 0 disables the cap.
+	MaxLLMCalls int
+
 	// SKIP_REVIEW skips the reviewer agent entirely; the coder's first output
 	// is accepted as-is. Useful on slow hardware.
 	SkipReview bool
@@ -41,6 +45,7 @@ func Load() Config {
 		Provider:     getEnv("LLM_PROVIDER", "mock"),
 		Model:        getEnv("LLM_MODEL", ""),
 		MaxRevisions: getEnvInt("MAX_REVISIONS", 3),
+		MaxLLMCalls:  getEnvInt("MAX_LLM_CALLS", 50),
 		SkipReview:   getEnvBool("SKIP_REVIEW", false),
 		RunTests:     getEnvBool("RUN_TESTS", true),
 		OutputDir:    getEnv("OUTPUT_DIR", "output"),

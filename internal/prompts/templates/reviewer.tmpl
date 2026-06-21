@@ -15,6 +15,8 @@ Build: {{ if .ExecResult.BuildOK }}✓ passed{{ else }}✗ FAILED{{ end }}
 {{ if .ExecResult.BuildOK }}
 Tests: {{ if .ExecResult.TestOK }}✓ passed{{ else }}✗ FAILED{{ end }}
 {{ if .ExecResult.TestOut }}{{ .ExecResult.TestOut }}{{ end }}
+Vet: {{ if .ExecResult.VetOK }}✓ clean{{ else }}✗ issues{{ end }}
+{{ if not .ExecResult.VetOK }}{{ .ExecResult.VetOut }}{{ end }}
 {{ end }}
 {{ end }}{{ end }}
 Evaluation criteria:
@@ -30,6 +32,9 @@ Rules:
 - List specific, actionable issues. Avoid vague comments like "improve readability".
 - Use severity "critical" for bugs or missing functionality, "major" for significant gaps,
   and "minor" for style or non-blocking improvements.
+- Token economy: keep "feedback" to one or two sentences and each issue "description"
+  and "suggestion" to a brief, specific phrase. Do not restate the code or pad with
+  context. Be terse but precise — never omit a real issue to save tokens.
 
 Respond with a single JSON object matching this schema exactly. Output ONLY valid JSON — no markdown fences, no explanation.
 

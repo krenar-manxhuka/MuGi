@@ -11,19 +11,29 @@ import (
 	"mugi/internal/state"
 )
 
+// reviewerProfile is the Reviewer's generation contract. Detailed reviews
+// (feedback + several issues) need headroom so a thorough review isn't truncated
+// into invalid JSON. A reviewer failure is non-fatal (the orchestrator keeps the
+// current artifact), but one resample recovers a transient bad sample cheaply.
+var reviewerProfile = generationProfile{
+	role:        "reviewer",
+	maxTokens:   4096,
+	temperature: 0.1,
+	attempts:    2,
+}
+
 // Reviewer inspects the Coder's artifact and decides whether it is ready to
 // ship or should be sent back for revision.
 type Reviewer struct {
-	provider llm.Provider
-	loader   *prompts.Loader
+	llmAgent
 }
 
 // NewReviewer returns a Reviewer backed by the given provider and loader.
 func NewReviewer(provider llm.Provider, loader *prompts.Loader) *Reviewer {
-	return &Reviewer{provider: provider, loader: loader}
+	return &Reviewer{llmAgent{provider: provider, loader: loader}}
 }
 
-func (r *Reviewer) Role() string { return "reviewer" }
+func (r *Reviewer) Role() string { return reviewerProfile.role }
 
 // reviewerData is the template context for reviewer.tmpl.
 type reviewerData struct {
@@ -39,6 +49,11 @@ func (r *Reviewer) Process(ctx context.Context, st *state.WorkflowState) error {
 	artifact := st.GetArtifact()
 	if artifact == nil {
 		return fmt.Errorf("reviewer: no artifact available in state")
+	}
+	// As an extra safeguard: re-validate the artifact reached us intact through
+	// mutable shared state before reviewing (and writing) it.
+	if err := artifact.Validate(); err != nil {
+		return fmt.Errorf("reviewer: invalid artifact in state: %w", err)
 	}
 
 	artifactBytes, err := json.MarshalIndent(artifact, "", "  ")
@@ -58,29 +73,13 @@ func (r *Reviewer) Process(ctx context.Context, st *state.WorkflowState) error {
 		return fmt.Errorf("reviewer: render prompt: %w", err)
 	}
 
-	resp, err := r.provider.Generate(ctx, llm.Request{
-		SystemPrompt: sysPrompt,
-		Messages: []llm.Message{
-			{Role: "user", Content: fmt.Sprintf("Review revision %d of the artifact.", artifact.Revision)},
-		},
-		MaxTokens:   2048,
-		Temperature: 0.1,
-	})
+	userMsg := fmt.Sprintf("Review revision %d of the artifact.", artifact.Revision)
+	review, err := generateFor[models.Review, *models.Review](ctx, r.llmAgent, reviewerProfile, sysPrompt, userMsg)
 	if err != nil {
-		return fmt.Errorf("reviewer: llm: %w", err)
+		return err
 	}
 
-	raw := extractJSON(resp.Content)
-	var review models.Review
-	if err := json.Unmarshal([]byte(raw), &review); err != nil {
-		preview := resp.Content
-		if len(preview) > 300 {
-			preview = preview[:300] + "…"
-		}
-		return fmt.Errorf("reviewer: parse review JSON: %w\nraw response (truncated):\n%s", err, preview)
-	}
-
-	st.AddReview(&review)
+	st.AddReview(review)
 	verdict := "needs revision"
 	if review.Approved {
 		verdict = "APPROVED"

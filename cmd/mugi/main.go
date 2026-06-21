@@ -23,6 +23,7 @@ import (
 
 	"mugi/internal/agents"
 	"mugi/internal/config"
+	"mugi/internal/fsafe"
 	"mugi/internal/llm"
 	"mugi/internal/models"
 	"mugi/internal/orchestrator"
@@ -53,7 +54,11 @@ func main() {
 		slog.Error("failed to initialise LLM provider", "err", err)
 		os.Exit(1)
 	}
-	slog.Info("using LLM provider", "provider", provider.Name())
+	// Cap total LLM spend per run as a defence-in-depth guardrail.
+	if cfg.MaxLLMCalls > 0 {
+		provider = llm.NewBudgetProvider(provider, cfg.MaxLLMCalls)
+	}
+	slog.Info("using LLM provider", "provider", provider.Name(), "max_llm_calls", cfg.MaxLLMCalls)
 
 	loader := prompts.NewLoader(cfg.PromptsDir)
 
@@ -90,6 +95,7 @@ func main() {
 			slog.Warn("could not write output files", "err", writeErr)
 		} else {
 			slog.Info("artifact written", "dir", cfg.OutputDir)
+			printRunInstructions(cfg.OutputDir, artifact, st.GetExecResult())
 		}
 	}
 }
@@ -173,9 +179,12 @@ func writeArtifact(dir string, artifact *models.Artifact) error {
 		return err
 	}
 
-	// Write each source file
+	// Write each source file, containing model-controlled paths within dir.
 	for _, f := range artifact.Files {
-		dest := filepath.Join(dir, f.Path)
+		dest, err := fsafe.SafeJoin(dir, f.Path)
+		if err != nil {
+			return fmt.Errorf("unsafe artifact path %q: %w", f.Path, err)
+		}
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 			return fmt.Errorf("mkdir %s: %w", filepath.Dir(dest), err)
 		}
@@ -183,7 +192,57 @@ func writeArtifact(dir string, artifact *models.Artifact) error {
 			return fmt.Errorf("write %s: %w", dest, err)
 		}
 	}
+
+	// Ensure the output is a buildable module so `go run .` / `go test ./...`
+	// work out of the box. Mirrors the runner, which synthesises the same go.mod
+	// when the model omits one — so what we ship matches what was verified.
+	if !artifactHasGoMod(artifact) {
+		modPath := filepath.Join(dir, "go.mod")
+		if err := os.WriteFile(modPath, []byte("module generated\n\ngo 1.21\n"), 0o644); err != nil {
+			return fmt.Errorf("write go.mod: %w", err)
+		}
+	}
 	return nil
+}
+
+// artifactHasGoMod reports whether the artifact already includes a go.mod.
+func artifactHasGoMod(a *models.Artifact) bool {
+	for _, f := range a.Files {
+		if f.Path == "go.mod" {
+			return true
+		}
+	}
+	return false
+}
+
+// isRunnable reports whether the artifact is an executable command (has a main
+// package with a main function) rather than a library.
+func isRunnable(a *models.Artifact) bool {
+	for _, f := range a.Files {
+		if strings.Contains(f.Content, "package main") && strings.Contains(f.Content, "func main(") {
+			return true
+		}
+	}
+	return false
+}
+
+// printRunInstructions tells the user exactly how to run what was produced,
+// tailored to whether it's a command or a library, and flags build/test issues.
+func printRunInstructions(dir string, a *models.Artifact, exec *models.ExecResult) {
+	fmt.Println("\nNext steps:")
+	if isRunnable(a) {
+		fmt.Printf("  cd %s && go run .\n", dir)
+	} else {
+		fmt.Printf("  cd %s && go test ./...\n", dir)
+	}
+	if exec != nil && !exec.Skipped {
+		switch {
+		case !exec.BuildOK:
+			fmt.Println("  ⚠ the generated code did not build cleanly — review it before relying on it.")
+		case !exec.TestOK:
+			fmt.Println("  ⚠ the code builds but some tests failed — review it before relying on it.")
+		}
+	}
 }
 
 func writeFile(path string, data func() ([]byte, error)) error {

@@ -15,10 +15,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -49,7 +51,7 @@ var pricing = map[string]priceCard{
 	"anthropic/claude-sonnet-4-6": {3.00, 15.00},
 	"anthropic/claude-haiku-4-5":  {1.00, 5.00},
 	// Ollama models run locally and are billed at $0/MTok. Latency != free.
-	"ollama/":                     {0, 0},
+	"ollama/": {0, 0},
 }
 
 // --- task model -----------------------------------------------------------
@@ -201,6 +203,7 @@ func main() {
 	maxRev := flag.Int("max-revisions", 3, "max coder/reviewer cycles per task")
 	quick := flag.Bool("quick", false, "smoke run: one task per tier")
 	verbose := flag.Bool("v", false, "stream orchestrator logs to stderr")
+	keepArtifacts := flag.Bool("keep-artifacts", false, "write each run's generated files under <out>/_artifacts/ for inspection")
 	flag.Parse()
 
 	logLevel := slog.LevelError
@@ -236,6 +239,13 @@ func main() {
 
 	loader := prompts.NewLoader("prompts")
 
+	artifactsDir := ""
+	if *keepArtifacts {
+		// Leading underscore: the go tool ignores such dirs, so dumped
+		// (often non-compiling) artifacts don't break `go build ./...`.
+		artifactsDir = filepath.Join(*outDir, "_artifacts")
+	}
+
 	totalRuns := len(tasks) * len(provs)
 	fmt.Fprintf(os.Stderr, "running %d tasks × %d providers = %d runs (maxRevisions=%d)\n\n",
 		len(tasks), len(provs), totalRuns, *maxRev)
@@ -250,7 +260,7 @@ func main() {
 			completed++
 			fmt.Fprintf(os.Stderr, "[%d/%d] %s × %s ... ", completed, totalRuns, pName, t.ID)
 
-			row := runOnce(t, p, loader, *maxRev)
+			row := runOnce(t, p, loader, *maxRev, artifactsDir)
 			rows = append(rows, row)
 
 			outcome := "ok"
@@ -281,7 +291,7 @@ func main() {
 
 // --- run one task on one provider -----------------------------------------
 
-func runOnce(t Task, inner llm.Provider, loader *prompts.Loader, maxRev int) Row {
+func runOnce(t Task, inner llm.Provider, loader *prompts.Loader, maxRev int, artifactsDir string) Row {
 	row := Row{
 		TaskID:        t.ID,
 		Tier:          t.Tier,
@@ -325,7 +335,7 @@ func runOnce(t Task, inner llm.Provider, loader *prompts.Loader, maxRev int) Row
 	row.CostUSD = computeCost(inner.Name(), in, out)
 
 	if err != nil {
-		row.Error = err.Error()
+		row.Error = scrubPaths(err.Error())
 		return row
 	}
 
@@ -333,10 +343,10 @@ func runOnce(t Task, inner llm.Provider, loader *prompts.Loader, maxRev int) Row
 		row.BuildOK = exec.BuildOK
 		row.TestOK = exec.TestOK
 		if !exec.BuildOK {
-			row.BuildOut = truncate(exec.BuildOut, 4000)
+			row.BuildOut = scrubPaths(truncate(exec.BuildOut, 4000))
 		}
 		if exec.BuildOK && !exec.TestOK {
-			row.TestOut = truncate(exec.TestOut, 4000)
+			row.TestOut = scrubPaths(truncate(exec.TestOut, 4000))
 		}
 	}
 	if a := st.GetArtifact(); a != nil {
@@ -344,6 +354,11 @@ func runOnce(t Task, inner llm.Provider, loader *prompts.Loader, maxRev int) Row
 			if strings.HasSuffix(f.Path, "_test.go") {
 				row.TestsPresent = true
 				break
+			}
+		}
+		if artifactsDir != "" {
+			if err := dumpArtifact(artifactsDir, inner.Name(), t.ID, a); err != nil {
+				fmt.Fprintf(os.Stderr, "  warn: dump artifact %s: %v\n", t.ID, err)
 			}
 		}
 	}
@@ -607,17 +622,89 @@ func writeMarkdown(path string, rows []Row, totalElapsed time.Duration) error {
 		fmt.Fprintln(f)
 	}
 
+	writeFailureAnalysis(f, rows)
+
 	fmt.Fprintln(f, "Raw data: [`results.csv`](results.csv) · [`summary.json`](summary.json)")
 	return nil
+}
+
+// writeFailureAnalysis emits a per-failure breakdown grounded in each artifact's
+// actual go build / go test output, so the report reads like an eval rather than
+// a leaderboard. Mock is excluded: it is the all-green harness contract test, not
+// a model under evaluation. A failure is any non-mock row that errored before
+// producing an artifact, failed to build, or built but failed its tests.
+func writeFailureAnalysis(f io.Writer, rows []Row) {
+	var failures []Row
+	for _, r := range rows {
+		if r.Provider == "mock" {
+			continue
+		}
+		if r.Error != "" || !r.BuildOK || (r.TestsPresent && !r.TestOK) {
+			failures = append(failures, r)
+		}
+	}
+
+	fmt.Fprintln(f, "## Failure analysis")
+	fmt.Fprintln(f)
+	fmt.Fprintln(f, "Each failure below is grounded in the artifact's real `go build` / `go test` output. "+
+		"Mock is the all-green harness baseline and is excluded.")
+	fmt.Fprintln(f)
+
+	if len(failures) == 0 {
+		fmt.Fprintln(f, "No build or test failures across the non-baseline providers in this run.")
+		fmt.Fprintln(f)
+		return
+	}
+
+	sort.SliceStable(failures, func(i, j int) bool {
+		if failures[i].Provider != failures[j].Provider {
+			return failures[i].Provider < failures[j].Provider
+		}
+		return failures[i].TaskID < failures[j].TaskID
+	})
+
+	for _, r := range failures {
+		stage, evidence := classifyFailure(r)
+		fmt.Fprintf(f, "### `%s` — %s\n\n", r.Provider, r.TaskName)
+		fmt.Fprintf(f, "- **Stage:** %s\n", stage)
+		fmt.Fprintf(f, "- **Revisions used:** %d", r.RevisionsUsed)
+		if r.ReviewerScore >= 0 {
+			fmt.Fprintf(f, " · **reviewer score:** %d/10 (approved=%v)", r.ReviewerScore, r.Approved)
+		}
+		fmt.Fprintln(f)
+		if evidence != "" {
+			fmt.Fprintf(f, "- **Evidence (captured output):**\n\n```\n%s\n```\n", evidence)
+		}
+		fmt.Fprintln(f)
+	}
+}
+
+// classifyFailure maps a failing row to the stage it failed at and the captured
+// output that evidences it. The order matters: an error means no artifact was
+// produced; otherwise build is checked before test.
+func classifyFailure(r Row) (stage, evidence string) {
+	switch {
+	case r.Error != "":
+		return "errored before a buildable artifact — the pipeline could not parse the model's output",
+			truncate(strings.TrimSpace(r.Error), 600)
+	case !r.BuildOK:
+		return "`go build` failed — the model emitted uncompilable Go",
+			truncate(strings.TrimSpace(r.BuildOut), 600)
+	case r.TestsPresent && !r.TestOK:
+		return "built, but `go test` failed",
+			truncate(strings.TrimSpace(r.TestOut), 600)
+	default:
+		return "unknown", ""
+	}
 }
 
 // --- aggregation helpers --------------------------------------------------
 
 type summary struct {
-	total                                    int
-	buildPass, testPass                      int
-	avgScore, avgRevisions, avgDurationMs    float64
-	totalCostUSD                             float64
+	total                                 int
+	buildPass, testPass                   int
+	avgScore, avgRevisions, avgDurationMs float64
+	totalCostUSD                          float64
 }
 
 func summarise(rows []Row, provider string) summary {
@@ -724,6 +811,39 @@ func fmtMs(ms float64) string {
 }
 
 // --- small utilities ------------------------------------------------------
+
+// dumpArtifact writes the model's generated files verbatim under
+// <artifactsDir>/<provider>/<taskID>/ so the raw output can be inspected.
+// The content written here is exactly what runner.Run writes before building,
+// so it is the literal model output, not a harness transformation.
+func dumpArtifact(artifactsDir, provider, taskID string, a *models.Artifact) error {
+	safeProvider := strings.NewReplacer("/", "_", ":", "-").Replace(provider)
+	base := filepath.Join(artifactsDir, safeProvider, taskID)
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		return err
+	}
+	for _, f := range a.Files {
+		dest := filepath.Join(base, filepath.FromSlash(f.Path))
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(dest, []byte(f.Content), 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// tmpRunPathRe matches the absolute path of a runner temp dir (Windows or
+// Unix) that the Go toolchain echoes into build/test output. We strip the
+// leading directory so committed results don't leak the local username/home.
+var tmpRunPathRe = regexp.MustCompile(`(?:[A-Za-z]:\\[^\s"]*?|/[^\s"]*?)mugi-run-\d+`)
+
+// scrubPaths replaces machine-specific temp paths with a stable placeholder so
+// benchmark output is reproducible and free of local identifiers.
+func scrubPaths(s string) string {
+	return tmpRunPathRe.ReplaceAllString(s, "<tmpdir>/mugi-run-XXXX")
+}
 
 func truncate(s string, max int) string {
 	if len(s) <= max {

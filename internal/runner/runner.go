@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"mugi/internal/fsafe"
 	"mugi/internal/models"
 )
 
@@ -62,7 +63,13 @@ func runGo(ctx context.Context, files []models.File, timeout time.Duration) *mod
 	// Write all files, creating subdirectories as needed.
 	hasGoMod := false
 	for _, f := range files {
-		dest := filepath.Join(dir, filepath.FromSlash(f.Path))
+		// Contain model-controlled paths: reject anything that would escape the
+		// run directory (absolute or "../" traversal).
+		dest, err := fsafe.SafeJoin(dir, f.Path)
+		if err != nil {
+			res.BuildOut = fmt.Sprintf("runner: unsafe file path %q: %v", f.Path, err)
+			return res
+		}
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 			res.BuildOut = fmt.Sprintf("runner: mkdir %s: %v", filepath.Dir(dest), err)
 			return res
@@ -95,14 +102,51 @@ func runGo(ctx context.Context, files []models.File, timeout time.Duration) *mod
 	res.BuildOK = buildOK
 	res.BuildOut += buildOut
 
-	// Test only when the build passed.
+	// Test and vet only when the build passed (both need compilable code).
 	if buildOK {
 		testOut, testOK := runCmd(ctx, dir, timeout, "go", "test", "./...")
 		res.TestOK = testOK
 		res.TestOut = testOut
+
+		// go vet is a cheap static-analysis signal (suspicious constructs the
+		// compiler accepts). It feeds the reviewer, raising output quality without
+		// being a hard gate.
+		vetOut, vetOK := runCmd(ctx, dir, timeout, "go", "vet", "./...")
+		res.VetOK = vetOK
+		res.VetOut = vetOut
 	}
 
 	return res
+}
+
+// secretEnvMarkers are case-insensitive substrings identifying environment
+// variables that hold credentials. Any matching variable is stripped before we
+// execute untrusted, model-generated code (`go build`/`go test` run arbitrary
+// code), so a generated test cannot read or exfiltrate a secret like
+// ANTHROPIC_API_KEY from the host environment.
+var secretEnvMarkers = []string{"API_KEY", "APIKEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "ANTHROPIC", "OPENAI"}
+
+// scrubbedEnv returns the parent environment with credential-bearing variables
+// removed. It keeps build-relevant vars (PATH, GOCACHE, …) so the toolchain
+// still works, while denying untrusted code access to secrets.
+func scrubbedEnv() []string {
+	src := os.Environ()
+	out := make([]string, 0, len(src))
+	for _, kv := range src {
+		name, _, _ := strings.Cut(kv, "=")
+		upper := strings.ToUpper(name)
+		secret := false
+		for _, m := range secretEnvMarkers {
+			if strings.Contains(upper, m) {
+				secret = true
+				break
+			}
+		}
+		if !secret {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 // runCmd executes a command in dir, returning combined output and whether it exited 0.
@@ -112,6 +156,7 @@ func runCmd(ctx context.Context, dir string, timeout time.Duration, name string,
 
 	cmd := exec.CommandContext(tctx, name, args...)
 	cmd.Dir = dir
+	cmd.Env = scrubbedEnv() // never expose host secrets to model-generated code
 
 	var buf bytes.Buffer
 	cmd.Stdout = &buf

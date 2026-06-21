@@ -8,54 +8,132 @@ review is grounded in real execution output, not LLM speculation.
 
 ---
 
-## Benchmark
+## Benchmark — execution-grounded evaluation
 
-12 small Go tasks (4 easy / 5 medium / 3 hard), each with explicit function
-signatures and required test cases. The pipeline is scored on
-`go build` + `go test` results, the reviewer's final score, revisions used,
-wall-clock latency, and dollar cost.
+The heart of this repo is an **eval harness** (`cmd/bench`) that runs the full
+pipeline against 12 small Go tasks (4 easy / 5 medium / 3 hard), each with
+explicit function signatures and required test cases, and **compiles and tests
+every generated artifact** before scoring it. The goal isn't a leaderboard — it
+is to surface *where and how* models fail, grounded in real `go build` /
+`go test` output rather than an LLM's self-assessment.
+
+Real numbers from a single run on **2026-06-21**
+(`go run ./cmd/bench -providers mock,haiku,sonnet`):
 
 | Provider | Build pass | Test pass | Avg score | Avg revisions | Avg latency | Total cost |
 |---|---:|---:|---:|---:|---:|---:|
-| `mock` (harness baseline) | 12/12 | 12/12 | 9.0 | 0.0 | 9.3s | $0.0000 |
-| `ollama/qwen3:1.7b` | _run `go run ./cmd/bench -providers ollama` to populate_ | | | | | |
-| `anthropic/claude-sonnet-4-6` | _set `ANTHROPIC_API_KEY` and re-run_ | | | | | |
-| `anthropic/claude-haiku-4-5` | _set `ANTHROPIC_API_KEY` and re-run_ | | | | | |
+| `mock` (harness baseline) | 12/12 | 12/12 | 9.0 | 0.0 | 8.5s | $0.0000 |
+| `anthropic/claude-haiku-4-5-20251001` | 12/12 | 8/12 | 9.2 | 0.2 | 50.2s | $0.4972 |
+| `anthropic/claude-sonnet-4-6` | 11/12 † | 10/12 | 9.4 | 0.0 | 97.9s | $1.0176 |
+| `ollama/qwen2.5-coder:7b` | _not run this cycle ‡_ | | | | | |
 
-> **Why the Anthropic rows are empty:** running the two paid Anthropic models
-> across all 12 tasks would have incurred non-trivial API cost, so those rows
-> are left for whoever runs the harness next with their own key. The local
-> Ollama row is testable on commodity hardware and will be populated in a
-> follow-up run; a partial smoke run (3 tasks, `qwen3:1.7b`) already lives in
-> [`bench/results-ollama-quick/`](bench/results-ollama-quick/RESULTS.md) for
-> reference.
+Full per-task detail and the **captured failure output** for every miss:
+[`bench/results/RESULTS.md`](bench/results/RESULTS.md) · raw rows:
+[`bench/results/results.csv`](bench/results/results.csv) · how to run:
+[`bench/README.md`](bench/README.md).
 
-Full per-task detail: [`bench/results/RESULTS.md`](bench/results/RESULTS.md) ·
-raw data: [`bench/results/results.csv`](bench/results/results.csv) ·
-how to run: [`bench/README.md`](bench/README.md).
+> **† Sonnet's one non-pass was infrastructure, not the model.** The Worker Pool
+> task errored with `unexpected EOF` from the Anthropic API after the provider's
+> retry/backoff exhausted (~5 min). The harness records it as a 💥 error row,
+> kept distinct from build/test failures (Failure mode #3). Sonnet built all 11
+> other tasks and passed tests on 10 of them — only the Expr Evaluator missed,
+> on a single `-1 * -1` edge case.
+>
+> **‡ Ollama is left unrun rather than filled with stale numbers.** A full local
+> run with `qwen2.5-coder:7b` OOM-killed the host on the reviewer's large-context
+> call. Integrity rule for this table: every number comes from a run reproducible
+> from `bench/results/`; a row that can't be run cleanly is marked unrun, not
+> back-filled. To populate it, run the reviewer with a smaller context (or on a
+> larger-RAM machine) and `LLM_MODEL=qwen2.5-coder:7b go run ./cmd/bench -providers ollama`.
 
-### What we learned from this run
+### Metrics
 
-- **Mock is a contract test for the harness, not a benchmark.** The mock
-  provider returns the same canned HTTP-server artifact for every task
-  description, so its 12/12 pass rate measures whether the orchestrator,
-  executor, and scorer agree end-to-end — not whether an LLM can solve
-  FizzBuzz. Treat the mock row as the "all green" baseline that proves the
-  rig is working.
-- **The eval surfaced a real bug in `runner.detectLang` on the first run.**
-  It was reading only the first file's `Lang` field, which for any Go module
-  is `go.mod` with `lang: "text"`. The runner was silently skipping build
-  and test execution for every real artifact. Fixed in
-  [internal/runner/runner.go](internal/runner/runner.go). This is the kind
-  of thing only an eval harness catches — manual smoke tests would have kept
-  shipping false `build_ok: false` results forever.
-- **The build/test round-trip dominates per-task latency.** Each mock run
-  takes ~9s end-to-end while the mock LLM itself returns instantly. That's
-  the `go build` + `go test` cycle inside the temp dir. Implication: for a
-  fast model (Haiku, local 7B), the executor becomes the bottleneck — worth
-  caching across same-content artifacts if we ever batch-evaluate at scale.
+- **Build pass** — `go build ./...` succeeded on the final artifact.
+- **Test pass** — `go test ./...` also passed *and* the artifact shipped at least
+  one `*_test.go` file (so "wrote no tests" cannot score as a pass).
+- **Avg score** — mean of the reviewer agent's final 0–10 score.
+- **Avg revisions** — mean coder→reviewer cycles used (0 = approved first try; 3 = hit the cap).
+- **Avg latency** — wall-clock per task, end to end (inference + `go build` + `go test`).
+- **Total cost** — summed token usage × per-model price (the `pricing` table in `cmd/bench/main.go`).
 
-(More observations land here as the Anthropic and Ollama rows fill in.)
+### Failure modes the harness has caught
+
+Each item is a methodology point — what the eval surfaced, the root cause, and
+why manual testing would have missed it.
+
+**1. The LLM reviewer approves code that fails its own tests.** In the 2026-06-21
+run, *every* Haiku artifact that failed `go test` was nonetheless **approved by
+the reviewer at 9/10** — and so was Sonnet's one test failure:
+
+| Task | Model | Reviewer verdict | What `go test` actually caught |
+|---|---|---|---|
+| Pub/Sub | haiku | approved · 9/10 | test file won't compile: `declared and not used: ch` |
+| Worker Pool | haiku | approved · 9/10 | `Shutdown` exceeds its deadline (`context deadline exceeded`) |
+| Expr Evaluator | haiku | approved · 9/10 | 4 correctness bugs: `.5` lexing, `1++2` not rejected, unary `+1`, wrong precedence |
+| LRU Cache | haiku | approved · 9/10 | eviction bug: `Get(1) should return false after eviction` |
+| Expr Evaluator | sonnet | approved · 9/10 | `-1 * -1` evaluates instead of erroring per the task contract |
+
+Root cause: the reviewer **is handed the `go build` / `go test` output** (the
+orchestrator runs the artifact before the review), but its holistic "this looks
+like correct Go" judgment overrides the explicit failing signal — it approved all
+five at 9/10 anyway. **Why this matters:** you cannot delegate the quality gate to
+the LLM reviewer *even when you feed it the test results*. The harness therefore
+computes `build_ok` / `test_ok` itself, independently of the reviewer score, so a
+rubber-stamped artifact still surfaces as test ✗. (Eyeballing one "looks-right"
+program by hand reproduces exactly the reviewer's blind spot — only scoring
+execution across every artifact exposes it.) Full captured output for every row
+above: [`bench/results/RESULTS.md`](bench/results/RESULTS.md).
+
+**2. `runner.detectLang` silently skipped execution for every artifact.** An
+earlier version read only the *first* file's `Lang` field — which for any Go
+module is `go.mod` with `lang: "text"` — so it returned `"text"`, found no
+matching executor, and marked every artifact `Skipped`: build and test never ran.
+The eval surfaced it because build/test results were absent across *all* real
+artifacts at once, not in any single case. Root cause: detection keyed on
+`files[0]` instead of scanning for any `.go` file; fixed in
+[internal/runner/runner.go](internal/runner/runner.go) (any `.go` file ⇒ run as
+Go). **Why manual testing misses it:** a hand-run of one generated program
+compiles fine — the bug only shows up as a systematic "nothing is being executed"
+pattern across the whole suite, which is exactly what a harness makes visible.
+
+**3. Infrastructure failures are kept distinct from model failures.** Sonnet's
+Worker Pool task errored with `unexpected EOF` from the Anthropic API after the
+provider's retry/backoff gave up (~5 min). The harness records that as a 💥 error
+row with no artifact — never as a build or test failure — so a dropped connection
+is never miscounted as "the model can't solve worker pools." A naive harness that
+lumped the two together would report a misleading capability number.
+
+**Local models (`qwen2.5-coder:7b`).** A full local run OOM-killed the host on the
+reviewer's large-context call — the reviewer prompt embeds the full artifact JSON,
+which is heavy for a 7B model on commodity hardware — which is why that row is left
+unrun. In isolated single-task smoke tests the same model produced *correct*
+FizzBuzz logic but omitted its `fmt` and `reflect` imports, so it would not
+compile: another "looks right, doesn't build" case that only execution catches.
+(Smoke-test observations, not a scored benchmark row.)
+
+> **The mock row is a contract test for the harness, not a model benchmark.** The
+> mock returns the same canned artifact for every task, so its 12/12 verifies that
+> the orchestrator, executor, and scorer agree end to end — the "all green"
+> baseline that proves the rig itself works.
+
+### Limitations & next steps
+
+An honest snapshot, not a finished eval platform. Known gaps, in priority order:
+
+1. **Single run, no repeated trials.** Model failures shift run to run, so a
+   one-shot pass rate conflates capability with nondeterminism. Next: a `-trials N`
+   flag reporting pass-rate mean ± range and flagging flaky tasks.
+2. **"Test pass" runs the model's own tests.** The coder writes both the code and
+   its tests, which can be jointly weak or wrong. Next: hold out a hidden,
+   harness-authored acceptance test per task and score against that — the strongest
+   credibility upgrade.
+3. **Execution is Go-only.** Non-Go artifacts are reported `skipped` (no signal).
+   Next: per-language runners, or scope the harness explicitly to Go.
+4. **Results persist only at the end of a run.** A crash mid-run loses completed
+   rows. Next: append each row to `results.csv` as it finishes so long runs survive
+   a failure.
+5. **Local-model row is unrun.** `qwen2.5-coder:7b` OOM'd the host on the reviewer's
+   large-context call. Next: shrink the reviewer context for local models, then run it.
 
 ---
 

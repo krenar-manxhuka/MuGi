@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -68,6 +69,7 @@ type openAIResp struct {
 		Message struct {
 			Content string `json:"content"`
 		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -122,7 +124,7 @@ func (p *OpenAIProvider) Generate(ctx context.Context, req Request) (Response, e
 	defer resp.Body.Close()
 
 	var result openAIResp
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&result); err != nil {
 		return Response{}, fmt.Errorf("openai: decode response: %w", err)
 	}
 	if result.Error != nil {
@@ -132,8 +134,16 @@ func (p *OpenAIProvider) Generate(ctx context.Context, req Request) (Response, e
 		return Response{}, fmt.Errorf("openai: no choices in response")
 	}
 
+	// Normalise OpenAI's "length" finish reason to the Anthropic "max_tokens"
+	// vocabulary so callers have a single truncation signal across providers.
+	stopReason := result.Choices[0].FinishReason
+	if stopReason == "length" {
+		stopReason = "max_tokens"
+	}
+
 	return Response{
-		Content: result.Choices[0].Message.Content,
+		Content:    result.Choices[0].Message.Content,
+		StopReason: stopReason,
 		Usage: Usage{
 			InputTokens:  result.Usage.PromptTokens,
 			OutputTokens: result.Usage.CompletionTokens,

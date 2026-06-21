@@ -200,3 +200,65 @@ func TestPlannerAcceptsMarkdownWrappedJSON(t *testing.T) {
 		t.Fatal("plan not set")
 	}
 }
+
+// TestPlannerAcceptsStringDependsOn reproduces the qwen2.5-coder planner
+// failure: depends_on emitted as JSON strings instead of ints. The pipeline
+// must parse it rather than erroring out before the coder runs.
+func TestPlannerAcceptsStringDependsOn(t *testing.T) {
+	mock := &llm.MockProvider{
+		CustomResponses: map[string]string{
+			"planner": `{
+  "summary": "FizzBuzz",
+  "steps": [
+    {"id": 1, "title": "module", "depends_on": []},
+    {"id": 2, "title": "impl", "depends_on": ["1"]}
+  ]
+}`,
+		},
+	}
+
+	p := agents.NewPlanner(mock, newMockLoader())
+	st := newTestState()
+	if err := p.Process(context.Background(), st); err != nil {
+		t.Fatalf("planner failed with string depends_on: %v", err)
+	}
+	plan := st.GetPlan()
+	if plan == nil {
+		t.Fatal("plan not set")
+	}
+	if len(plan.Steps) != 2 || len(plan.Steps[1].DependsOn) != 1 || plan.Steps[1].DependsOn[0] != 1 {
+		t.Fatalf("depends_on not parsed: %#v", plan.Steps)
+	}
+}
+
+// TestCoderAcceptsRawControlCharsInContent reproduces the qwen2.5-coder coder
+// failure: source code pasted into a "content" field with literal newlines and
+// tabs instead of \n and \t. The artifact must parse and preserve the code.
+func TestCoderAcceptsRawControlCharsInContent(t *testing.T) {
+	const code = "package fib\n\nimport \"fmt\"\n\nfunc Fib(n int) int {\n\treturn n\n}\n"
+	// JSON with a raw (unescaped) newline+tab body but escaped inner quotes —
+	// exactly the shape the model produced.
+	rawJSON := "{\n  \"summary\": \"fib\",\n  \"revision\": 1,\n  \"files\": [\n" +
+		"    {\"path\": \"fib.go\", \"lang\": \"go\", \"content\": \"" +
+		"package fib\n\nimport \\\"fmt\\\"\n\nfunc Fib(n int) int {\n\treturn n\n}\n" +
+		"\"}\n  ]\n}"
+
+	mock := &llm.MockProvider{
+		CustomResponses: map[string]string{"coder": rawJSON},
+	}
+
+	c := agents.NewCoder(mock, newMockLoader())
+	st := newTestState()
+	st.SetPlan(&models.Plan{Summary: "fib", Steps: []models.Step{{ID: 1, Title: "impl"}}})
+
+	if err := c.Process(context.Background(), st); err != nil {
+		t.Fatalf("coder failed with raw control chars in content: %v", err)
+	}
+	art := st.GetArtifact()
+	if art == nil || len(art.Files) != 1 {
+		t.Fatalf("artifact not parsed: %#v", art)
+	}
+	if art.Files[0].Content != code {
+		t.Fatalf("content not preserved:\nwant %q\ngot  %q", code, art.Files[0].Content)
+	}
+}

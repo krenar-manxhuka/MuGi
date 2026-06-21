@@ -12,19 +12,29 @@ import (
 	"mugi/internal/state"
 )
 
+// coderProfile is the Coder's generation contract. It needs the largest token
+// budget because it emits multi-file source artifacts; smaller caps truncated the
+// hardest tasks (e.g. expr-eval) into invalid JSON. max_tokens is a ceiling, not
+// a charge, and haiku/sonnet allow 64K output, so the headroom is free.
+var coderProfile = generationProfile{
+	role:        "coder",
+	maxTokens:   16384,
+	temperature: 0.1,
+	attempts:    2,
+}
+
 // Coder implements the plan produced by the Planner and revises its output
 // based on feedback from the Reviewer.
 type Coder struct {
-	provider llm.Provider
-	loader   *prompts.Loader
+	llmAgent
 }
 
 // NewCoder returns a Coder backed by the given provider and loader.
 func NewCoder(provider llm.Provider, loader *prompts.Loader) *Coder {
-	return &Coder{provider: provider, loader: loader}
+	return &Coder{llmAgent{provider: provider, loader: loader}}
 }
 
-func (c *Coder) Role() string { return "coder" }
+func (c *Coder) Role() string { return coderProfile.role }
 
 // coderData is the template context for coder.tmpl.
 type coderData struct {
@@ -41,6 +51,11 @@ func (c *Coder) Process(ctx context.Context, st *state.WorkflowState) error {
 	plan := st.GetPlan()
 	if plan == nil {
 		return fmt.Errorf("coder: no plan available in state")
+	}
+	// As an extra safeguard: the plan was validated when produced, but it reached us
+	// through mutable shared state — re-check before building on it.
+	if err := plan.Validate(); err != nil {
+		return fmt.Errorf("coder: invalid plan in state: %w", err)
 	}
 
 	planBytes, err := json.MarshalIndent(plan, "", "  ")
@@ -74,27 +89,15 @@ func (c *Coder) Process(ctx context.Context, st *state.WorkflowState) error {
 		userMsg = fmt.Sprintf("Revise the implementation based on the feedback above (revision %d).", prevRevision+1)
 	}
 
-	resp, err := c.provider.Generate(ctx, llm.Request{
-		SystemPrompt: sysPrompt,
-		Messages:     []llm.Message{{Role: "user", Content: userMsg}},
-		MaxTokens:    4096,
-		Temperature:  0.1,
-	})
+	artifact, err := generateFor[models.Artifact, *models.Artifact](ctx, c.llmAgent, coderProfile, sysPrompt, userMsg)
 	if err != nil {
-		return fmt.Errorf("coder: llm: %w", err)
+		return err
 	}
 
-	raw := extractJSON(resp.Content)
-	var artifact models.Artifact
-	if err := json.Unmarshal([]byte(raw), &artifact); err != nil {
-		preview := resp.Content
-		if len(preview) > 300 {
-			preview = preview[:300] + "…"
-		}
-		return fmt.Errorf("coder: parse artifact JSON: %w\nraw response (truncated):\n%s", err, preview)
-	}
+	// Canonicalise Go sources before they are built, reviewed, or written out.
+	formatGoSources(artifact)
 
-	st.SetArtifact(&artifact)
+	st.SetArtifact(artifact)
 	st.AddLog("coder", fmt.Sprintf("artifact revision %d produced (%d files): %s",
 		artifact.Revision, len(artifact.Files), artifact.Summary))
 	return nil

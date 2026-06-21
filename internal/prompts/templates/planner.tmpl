@@ -10,6 +10,10 @@ Rules:
 - List any external libraries, tools, or runtime requirements.
 - Call out risks or ambiguities that could affect the implementation.
 - State your assumptions explicitly so the Coder knows the context.
+- Token economy: use the fewest tokens that still convey a complete, correct plan.
+  Keep each "description" to one short sentence and each risk/assumption to a brief
+  phrase. Include only steps that change what the Coder does — no filler. Never drop
+  a step, dependency, or detail the Coder needs for correctness just to be shorter.
 
 Respond with a single JSON object that matches this schema exactly. Output ONLY valid JSON — no markdown fences, no explanation, no trailing text.
 

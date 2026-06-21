@@ -14,14 +14,16 @@ import (
 // decides (via its LLM call) whether output is ready or needs revision.
 // Routing decisions are enforced by the orchestrator; the coordinator
 // contributes the human-readable rationale logged alongside each decision.
+//
+// Unlike the structured agents it produces free-form prose, not validated JSON,
+// so it issues its LLM request directly rather than through generateFor.
 type Coordinator struct {
-	provider llm.Provider
-	loader   *prompts.Loader
+	llmAgent
 }
 
 // NewCoordinator returns a Coordinator backed by the given provider and loader.
 func NewCoordinator(provider llm.Provider, loader *prompts.Loader) *Coordinator {
-	return &Coordinator{provider: provider, loader: loader}
+	return &Coordinator{llmAgent{provider: provider, loader: loader}}
 }
 
 func (c *Coordinator) Role() string { return "coordinator" }

@@ -414,3 +414,6 @@ coverage.html
 
 # Artifact output directory
 output/
+
+# Bench -keep-artifacts dumps (model-generated source, often non-compiling)
+bench/results*/_artifacts/
