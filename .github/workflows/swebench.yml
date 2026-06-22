@@ -1,0 +1,111 @@
+name: SWE-bench (gold validation)
+
+# Manual, on-demand only. SWE-bench pulls multi-GB Docker images and runs real
+# repositories' test suites (untrusted code), so this must never run on push/PR —
+# only when you explicitly dispatch it. It evaluates the GOLD patches, which costs
+# nothing in model tokens: it proves the whole rig (disk, Docker, dataset, the
+# official harness) works end to end. Swapping `--predictions_path gold` for a
+# MuGi-generated predictions file is the only step that later costs API spend.
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Limit to one SWE-bench Lite repo (e.g. psf/requests). Empty = any."
+        required: false
+        default: ""
+      count:
+        description: "How many instances to evaluate. Keep small — images are large."
+        required: false
+        default: "1"
+
+permissions:
+  contents: read
+
+jobs:
+  gold-validation:
+    name: official harness · gold patches
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      # SWE-bench images need far more than the ~14 GB a runner has free. Removing
+      # preinstalled toolchains we don't use reclaims ~30 GB.
+      - name: Free up disk space
+        run: |
+          echo "before:"; df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force || true
+          echo "after:"; df -h /
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the official SWE-bench harness
+        run: |
+          python -m pip install --upgrade pip
+          pip install swebench datasets
+
+      # Pick the instance ids from the live dataset so they are always valid —
+      # no hardcoded ids that could drift out of the set.
+      - name: Select instances from SWE-bench Lite
+        id: select
+        env:
+          REPO: ${{ inputs.repo }}
+          COUNT: ${{ inputs.count }}
+        run: |
+          python - <<'PY'
+          import os
+          from datasets import load_dataset
+
+          ds = load_dataset("princeton-nlp/SWE-bench_Lite", split="test")
+          repo = os.environ.get("REPO", "").strip()
+          count = max(1, int(os.environ.get("COUNT", "1")))
+          ids = [r["instance_id"] for r in ds if not repo or r["repo"] == repo][:count]
+          if not ids:
+              raise SystemExit(f"no instances matched repo={repo!r}")
+          print("Selected instances:", ids)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("ids=" + " ".join(ids) + "\n")
+          PY
+
+      - name: Evaluate GOLD patches (zero model spend)
+        run: |
+          python -m swebench.harness.run_evaluation \
+            --dataset_name princeton-nlp/SWE-bench_Lite \
+            --predictions_path gold \
+            --max_workers 1 \
+            --run_id validate-gold \
+            --instance_ids ${{ steps.select.outputs.ids }}
+
+      # The harness is correct only if every gold patch it just ran resolves.
+      # This turns the rig's own correctness into a pass/fail gate.
+      - name: Assert all gold patches resolved
+        run: |
+          python - <<'PY'
+          import glob, json, sys
+
+          reports = sorted(glob.glob("*.validate-gold.json")) or sorted(glob.glob("*.json"))
+          if not reports:
+              sys.exit("no harness report file was produced")
+          rep = json.load(open(reports[0]))
+          print(json.dumps(rep, indent=2)[:2000])
+
+          resolved = rep.get("resolved_instances", 0)
+          completed = rep.get("completed_instances", 0)
+          if completed == 0 or resolved != completed:
+              sys.exit(f"GOLD VALIDATION FAILED: resolved={resolved} of completed={completed}")
+          print(f"OK — {resolved}/{completed} gold patches resolved; the harness is sound.")
+          PY
+
+      - name: Upload report + per-instance logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swebench-gold-report
+          path: |
+            *.json
+            logs/**
+          if-no-files-found: warn
