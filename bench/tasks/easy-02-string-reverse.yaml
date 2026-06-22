@@ -19,3 +19,29 @@ description: |
   - File `go.mod` declaring module example.com/revstr, go 1.21.
 
   No external dependencies. Must build and pass `go test ./...`.
+
+# Held-out acceptance test: run against the implementation alone (the coder
+# never sees it).
+hidden_test: |
+  import "testing"
+
+  func TestHiddenReverse(t *testing.T) {
+      cases := []struct{ in, want string }{
+          {"", ""},
+          {"a", "a"},
+          {"abc", "cba"},
+          {"héllo", "olléh"},
+          {"日本語", "語本日"},
+          {"ab©d", "d©ba"},
+      }
+      for _, c := range cases {
+          if got := Reverse(c.in); got != c.want {
+              t.Fatalf("Reverse(%q) = %q, want %q", c.in, got, c.want)
+          }
+      }
+      // Held-out property: reversing twice is the identity.
+      s := "Gophér→世界"
+      if got := Reverse(Reverse(s)); got != s {
+          t.Fatalf("Reverse(Reverse(%q)) = %q", s, got)
+      }
+  }

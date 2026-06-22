@@ -39,12 +39,40 @@ func (m *MockProvider) Generate(_ context.Context, req Request) (Response, error
 	return Response{Content: fmt.Sprintf("(mock) no route matched; user said: %s", last)}, nil
 }
 
+// coderArtifact is the canned multi-file artifact the mock returns for both the
+// pipeline Coder and the single-call (solo) agent, so the mock baseline is
+// all-green under either strategy.
+const coderArtifact = `{
+  "summary": "Minimal Go HTTP server with /health endpoint, slog logging, and graceful shutdown",
+  "revision": 1,
+  "files": [
+    {
+      "path": "go.mod",
+      "lang": "text",
+      "content": "module example.com/server\n\ngo 1.21\n"
+    },
+    {
+      "path": "main.go",
+      "lang": "go",
+      "content": "package main\n\nimport (\n\t\"context\"\n\t\"encoding/json\"\n\t\"log/slog\"\n\t\"net/http\"\n\t\"os\"\n\t\"os/signal\"\n\t\"syscall\"\n\t\"time\"\n)\n\nfunc healthHandler(w http.ResponseWriter, r *http.Request) {\n\tw.Header().Set(\"Content-Type\", \"application/json\")\n\tjson.NewEncoder(w).Encode(map[string]string{\"status\": \"ok\"})\n}\n\nfunc main() {\n\tlogger := slog.New(slog.NewJSONHandler(os.Stdout, nil))\n\tslog.SetDefault(logger)\n\n\tport := os.Getenv(\"PORT\")\n\tif port == \"\" {\n\t\tport = \"8080\"\n\t}\n\n\tmux := http.NewServeMux()\n\tmux.HandleFunc(\"/health\", healthHandler)\n\n\tsrv := &http.Server{\n\t\tAddr:         \":\" + port,\n\t\tHandler:      mux,\n\t\tReadTimeout:  5 * time.Second,\n\t\tWriteTimeout: 10 * time.Second,\n\t}\n\n\tgo func() {\n\t\tslog.Info(\"server starting\", \"port\", port)\n\t\tif err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {\n\t\t\tslog.Error(\"server error\", \"err\", err)\n\t\t\tos.Exit(1)\n\t\t}\n\t}()\n\n\tquit := make(chan os.Signal, 1)\n\tsignal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)\n\t<-quit\n\n\tctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)\n\tdefer cancel()\n\tif err := srv.Shutdown(ctx); err != nil {\n\t\tslog.Error(\"shutdown error\", \"err\", err)\n\t}\n\tslog.Info(\"server stopped\")\n}\n"
+    },
+    {
+      "path": "main_test.go",
+      "lang": "go",
+      "content": "package main\n\nimport (\n\t\"net/http\"\n\t\"net/http/httptest\"\n\t\"testing\"\n)\n\nfunc TestHealthHandler(t *testing.T) {\n\treq := httptest.NewRequest(http.MethodGet, \"/health\", nil)\n\tw := httptest.NewRecorder()\n\thealthHandler(w, req)\n\n\tif w.Code != http.StatusOK {\n\t\tt.Fatalf(\"expected 200, got %d\", w.Code)\n\t}\n\tif ct := w.Header().Get(\"Content-Type\"); ct != \"application/json\" {\n\t\tt.Fatalf(\"expected application/json, got %s\", ct)\n\t}\n}\n"
+    }
+  ]
+}`
+
 // defaultResponses maps routing keys to canned responses.
 // Keys use the unique opening sentence of each agent's template so that
 // partial keyword collisions (e.g. "reviewer" appearing in the coordinator
 // template as "Reviewer feedback:") never cause mis-routing.
 func defaultResponses() map[string]string {
 	return map[string]string{
+
+		// Single-call (solo) agent produces a complete JSON Artifact in one shot
+		"single pass": coderArtifact,
 
 		// Coordinator produces a plain-text narrative summary
 		"you are the coordinator agent": `Workflow progress report:
@@ -93,27 +121,7 @@ The task has been received and the pipeline is running as expected. The planner 
 }`,
 
 		// Coder produces a JSON Artifact
-		"you are the coder agent": `{
-  "summary": "Minimal Go HTTP server with /health endpoint, slog logging, and graceful shutdown",
-  "revision": 1,
-  "files": [
-    {
-      "path": "go.mod",
-      "lang": "text",
-      "content": "module example.com/server\n\ngo 1.21\n"
-    },
-    {
-      "path": "main.go",
-      "lang": "go",
-      "content": "package main\n\nimport (\n\t\"context\"\n\t\"encoding/json\"\n\t\"log/slog\"\n\t\"net/http\"\n\t\"os\"\n\t\"os/signal\"\n\t\"syscall\"\n\t\"time\"\n)\n\nfunc healthHandler(w http.ResponseWriter, r *http.Request) {\n\tw.Header().Set(\"Content-Type\", \"application/json\")\n\tjson.NewEncoder(w).Encode(map[string]string{\"status\": \"ok\"})\n}\n\nfunc main() {\n\tlogger := slog.New(slog.NewJSONHandler(os.Stdout, nil))\n\tslog.SetDefault(logger)\n\n\tport := os.Getenv(\"PORT\")\n\tif port == \"\" {\n\t\tport = \"8080\"\n\t}\n\n\tmux := http.NewServeMux()\n\tmux.HandleFunc(\"/health\", healthHandler)\n\n\tsrv := &http.Server{\n\t\tAddr:         \":\" + port,\n\t\tHandler:      mux,\n\t\tReadTimeout:  5 * time.Second,\n\t\tWriteTimeout: 10 * time.Second,\n\t}\n\n\tgo func() {\n\t\tslog.Info(\"server starting\", \"port\", port)\n\t\tif err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {\n\t\t\tslog.Error(\"server error\", \"err\", err)\n\t\t\tos.Exit(1)\n\t\t}\n\t}()\n\n\tquit := make(chan os.Signal, 1)\n\tsignal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)\n\t<-quit\n\n\tctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)\n\tdefer cancel()\n\tif err := srv.Shutdown(ctx); err != nil {\n\t\tslog.Error(\"shutdown error\", \"err\", err)\n\t}\n\tslog.Info(\"server stopped\")\n}\n"
-    },
-    {
-      "path": "main_test.go",
-      "lang": "go",
-      "content": "package main\n\nimport (\n\t\"net/http\"\n\t\"net/http/httptest\"\n\t\"testing\"\n)\n\nfunc TestHealthHandler(t *testing.T) {\n\treq := httptest.NewRequest(http.MethodGet, \"/health\", nil)\n\tw := httptest.NewRecorder()\n\thealthHandler(w, req)\n\n\tif w.Code != http.StatusOK {\n\t\tt.Fatalf(\"expected 200, got %d\", w.Code)\n\t}\n\tif ct := w.Header().Get(\"Content-Type\"); ct != \"application/json\" {\n\t\tt.Fatalf(\"expected application/json, got %s\", ct)\n\t}\n}\n"
-    }
-  ]
-}`,
+		"you are the coder agent": coderArtifact,
 
 		// Reviewer produces a JSON Review
 		"you are the reviewer agent": `{

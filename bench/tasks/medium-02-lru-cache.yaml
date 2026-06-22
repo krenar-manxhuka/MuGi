@@ -30,3 +30,48 @@ description: |
   - File `go.mod` declaring module example.com/lru, go 1.21.
 
   Standard library only. Must build and pass `go test ./...`.
+
+# Held-out acceptance test: run against the implementation alone (the coder
+# never sees it).
+hidden_test: |
+  import "testing"
+
+  func TestHiddenLRU(t *testing.T) {
+      c := New[string, int](2)
+      c.Put("a", 1)
+      c.Put("b", 2)
+      if v, ok := c.Get("a"); !ok || v != 1 {
+          t.Fatalf("Get(a) = %v,%v want 1,true", v, ok)
+      }
+      // "a" is now most-recently-used, so inserting "c" must evict "b".
+      c.Put("c", 3)
+      if _, ok := c.Get("b"); ok {
+          t.Fatal("b should have been evicted as least-recently-used")
+      }
+      if v, ok := c.Get("a"); !ok || v != 1 {
+          t.Fatalf("a should survive eviction: %v,%v", v, ok)
+      }
+      if v, ok := c.Get("c"); !ok || v != 3 {
+          t.Fatalf("Get(c) = %v,%v want 3,true", v, ok)
+      }
+      if c.Len() != 2 {
+          t.Fatalf("Len = %d, want 2", c.Len())
+      }
+      // Update-in-place must not change size or evict the other key.
+      c.Put("a", 11)
+      if v, _ := c.Get("a"); v != 11 {
+          t.Fatalf("update a = %d, want 11", v)
+      }
+      if c.Len() != 2 {
+          t.Fatalf("Len after update = %d, want 2", c.Len())
+      }
+      // Capacity <= 0 must panic.
+      func() {
+          defer func() {
+              if recover() == nil {
+                  t.Fatal("New[..](0) should panic")
+              }
+          }()
+          _ = New[int, int](0)
+      }()
+  }

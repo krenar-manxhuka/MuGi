@@ -20,3 +20,28 @@ description: |
 
   No external dependencies. The code must build with `go build ./...`
   and pass `go test ./...`.
+
+# Held-out acceptance test: injected into the implementation's package by the
+# bench (the coder never sees it) and run against the implementation alone.
+hidden_test: |
+  import (
+      "reflect"
+      "testing"
+  )
+
+  func TestHiddenFizzBuzz(t *testing.T) {
+      want := []string{"1", "2", "Fizz", "4", "Buzz", "Fizz", "7", "8", "Fizz", "Buzz", "11", "Fizz", "13", "14", "FizzBuzz"}
+      if got := FizzBuzz(15); !reflect.DeepEqual(got, want) {
+          t.Fatalf("FizzBuzz(15) = %v, want %v", got, want)
+      }
+      if got := FizzBuzz(0); len(got) != 0 {
+          t.Fatalf("FizzBuzz(0) = %v, want empty", got)
+      }
+      if got := FizzBuzz(1); !reflect.DeepEqual(got, []string{"1"}) {
+          t.Fatalf("FizzBuzz(1) = %v, want one element", got)
+      }
+      got := FizzBuzz(30)
+      if got[14] != "FizzBuzz" || got[29] != "FizzBuzz" {
+          t.Fatalf("multiples of 15 wrong: idx14=%q idx29=%q", got[14], got[29])
+      }
+  }

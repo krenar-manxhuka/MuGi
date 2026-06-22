@@ -269,6 +269,38 @@ func TestOrchestratorObjectiveGateOverridesFalseApproval(t *testing.T) {
 	}
 }
 
+// TestSoloRunnerSingleCallProducesTestedArtifact verifies the single-call
+// ablation path: one Coder call yields a complete artifact that is then compiled
+// and tested, with no plan, no reviews, and no revision loop.
+func TestSoloRunnerSingleCallProducesTestedArtifact(t *testing.T) {
+	loader := prompts.NewLoader("")
+	solo := orchestrator.NewSolo(agents.NewSoloCoder(llm.NewMockProvider(), loader), true, nil)
+
+	st, err := solo.Run(context.Background(), newTask("Build a Go HTTP server with a /health endpoint"))
+	if err != nil {
+		t.Fatalf("solo Run returned error: %v", err)
+	}
+	if st.GetStatus() != models.StatusCompleted {
+		t.Fatalf("expected completed, got %s", st.GetStatus())
+	}
+	if st.GetArtifact() == nil {
+		t.Fatal("expected an artifact from the single call")
+	}
+	if st.GetPlan() != nil {
+		t.Fatal("single-call path must not produce a plan")
+	}
+	if n := len(st.AllReviews()); n != 0 {
+		t.Fatalf("single-call path must not produce reviews, got %d", n)
+	}
+	if iter, _, _ := st.Snapshot(); iter != 0 {
+		t.Fatalf("single-call path must use 0 revisions, got %d", iter)
+	}
+	exec := st.GetExecResult()
+	if exec == nil || !exec.BuildOK || !exec.TestOK {
+		t.Fatalf("expected build+test to pass on the single-call artifact, got %+v", exec)
+	}
+}
+
 // alternatingReviewerProvider is a test helper that cycles through a list of
 // reviewer responses while delegating everything else to a base provider.
 type alternatingReviewerProvider struct {

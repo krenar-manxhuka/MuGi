@@ -36,6 +36,8 @@ import (
 	"mugi/internal/models"
 	"mugi/internal/orchestrator"
 	"mugi/internal/prompts"
+	"mugi/internal/runner"
+	"mugi/internal/state"
 )
 
 // --- pricing (USD per 1M tokens) ------------------------------------------
@@ -63,6 +65,11 @@ type Task struct {
 	Name        string `yaml:"name"`
 	Tier        string `yaml:"tier"` // easy | medium | hard
 	Description string `yaml:"description"`
+	// HiddenTest is an optional harness-authored acceptance test (Go test body,
+	// no package clause) the coder never sees. When set, the bench runs it against
+	// the implementation alone for a held-out signal independent of the model's
+	// own tests.
+	HiddenTest string `yaml:"hidden_test"`
 }
 
 // --- benchmark result -----------------------------------------------------
@@ -72,6 +79,7 @@ type Row struct {
 	Tier          string  `json:"tier"`
 	TaskName      string  `json:"task_name"`
 	Provider      string  `json:"provider"`
+	Strategy      string  `json:"strategy"` // pipeline | single
 	BuildOK       bool    `json:"build_ok"`
 	TestsPresent  bool    `json:"tests_present"`
 	TestOK        bool    `json:"test_ok"`
@@ -86,7 +94,13 @@ type Row struct {
 	CostUSD       float64 `json:"cost_usd"`
 	BuildOut      string  `json:"build_out,omitempty"` // populated when BuildOK is false
 	TestOut       string  `json:"test_out,omitempty"`  // populated when TestOK is false
-	Error         string  `json:"error,omitempty"`
+	// Held-out acceptance test (the coder never saw it). HiddenPresent is false
+	// for tasks without one, in which case the other hidden fields are ignored.
+	HiddenPresent bool   `json:"hidden_present"`
+	HiddenBuildOK bool   `json:"hidden_build_ok"`
+	HiddenTestOK  bool   `json:"hidden_test_ok"`
+	HiddenOut     string `json:"hidden_out,omitempty"` // populated when the hidden test build/run fails
+	Error         string `json:"error,omitempty"`
 }
 
 // --- counting provider ----------------------------------------------------
@@ -204,10 +218,16 @@ func main() {
 	providersCSV := flag.String("providers", "mock,sonnet,haiku", "comma-separated provider names")
 	outDir := flag.String("out", "bench/results", "output directory for CSV / Markdown")
 	maxRev := flag.Int("max-revisions", 3, "max coder/reviewer cycles per task")
+	strategyFlag := flag.String("strategy", "pipeline", "orchestration strategy: pipeline | single | both (ablation)")
 	quick := flag.Bool("quick", false, "smoke run: one task per tier")
 	verbose := flag.Bool("v", false, "stream orchestrator logs to stderr")
 	keepArtifacts := flag.Bool("keep-artifacts", false, "write each run's generated files under <out>/_artifacts/ for inspection")
 	flag.Parse()
+
+	strategies, err := resolveStrategies(*strategyFlag)
+	if err != nil {
+		die("%v", err)
+	}
 
 	logLevel := slog.LevelError
 	if *verbose {
@@ -249,9 +269,9 @@ func main() {
 		artifactsDir = filepath.Join(*outDir, "_artifacts")
 	}
 
-	totalRuns := len(tasks) * len(provs)
-	fmt.Fprintf(os.Stderr, "running %d tasks × %d providers = %d runs (maxRevisions=%d)\n\n",
-		len(tasks), len(provs), totalRuns, *maxRev)
+	totalRuns := len(tasks) * len(provs) * len(strategies)
+	fmt.Fprintf(os.Stderr, "running %d tasks × %d providers × %d strategies (%s) = %d runs (maxRevisions=%d)\n\n",
+		len(tasks), len(provs), len(strategies), strings.Join(strategies, ","), totalRuns, *maxRev)
 
 	// Stream rows to results.csv as they finish so a crash mid-run keeps the
 	// rows completed so far. The JSON/Markdown reports are rendered at the end.
@@ -267,20 +287,22 @@ func main() {
 	for _, pName := range orderedProviderNames(provs) {
 		p := provs[pName]
 		for _, t := range tasks {
-			completed++
-			fmt.Fprintf(os.Stderr, "[%d/%d] %s × %s ... ", completed, totalRuns, pName, t.ID)
+			for _, strat := range strategies {
+				completed++
+				fmt.Fprintf(os.Stderr, "[%d/%d] %s × %s × %s ... ", completed, totalRuns, pName, t.ID, strat)
 
-			row := runOnce(t, p, loader, *maxRev, artifactsDir)
-			rows = append(rows, row)
-			streamer.add(row)
+				row := runOnce(t, p, loader, *maxRev, strat, artifactsDir)
+				rows = append(rows, row)
+				streamer.add(row)
 
-			outcome := "ok"
-			if row.Error != "" {
-				outcome = "ERR"
+				outcome := "ok"
+				if row.Error != "" {
+					outcome = "ERR"
+				}
+				fmt.Fprintf(os.Stderr, "%s  build=%v test=%v score=%d rev=%d fa=%d %dms $%.4f\n",
+					outcome, row.BuildOK, row.TestOK, row.ReviewerScore,
+					row.RevisionsUsed, row.FalseApproval, row.DurationMs, row.CostUSD)
 			}
-			fmt.Fprintf(os.Stderr, "%s  build=%v test=%v score=%d rev=%d fa=%d %dms $%.4f\n",
-				outcome, row.BuildOK, row.TestOK, row.ReviewerScore,
-				row.RevisionsUsed, row.FalseApproval, row.DurationMs, row.CostUSD)
 		}
 	}
 	streamer.close()
@@ -297,6 +319,7 @@ func main() {
 		OS:            runtime.GOOS,
 		Arch:          runtime.GOARCH,
 		MaxRevisions:  *maxRev,
+		Strategies:    strategies,
 		TasksGlob:     *tasksGlob,
 		TaskIDs:       taskIDs(tasks),
 		Providers:     orderedProviderNames(provs),
@@ -340,30 +363,63 @@ func providerModelNames(provs map[string]llm.Provider) map[string]string {
 	return out
 }
 
+// --- strategies -----------------------------------------------------------
+
+// resolveStrategies expands the -strategy flag into the list of orchestration
+// strategies to run. "both" runs the full pipeline and the single-call baseline
+// against every (task, provider) so they can be compared head to head.
+func resolveStrategies(flagVal string) ([]string, error) {
+	switch strings.ToLower(strings.TrimSpace(flagVal)) {
+	case "", "pipeline":
+		return []string{"pipeline"}, nil
+	case "single", "solo":
+		return []string{"single"}, nil
+	case "both", "all":
+		return []string{"pipeline", "single"}, nil
+	default:
+		return nil, fmt.Errorf("unknown -strategy %q (want pipeline | single | both)", flagVal)
+	}
+}
+
+// runStrategy executes one task under the named orchestration strategy and
+// returns the resulting workflow state. Both strategies share the same provider,
+// task, and objective build/test scoring; they differ only in how the artifact
+// is produced — the full Coordinator→Planner→Coder→Reviewer loop, or one
+// single-call Coder.
+func runStrategy(ctx context.Context, strategy string, provider llm.Provider, loader *prompts.Loader, maxRev int, task *models.Task) (*state.WorkflowState, error) {
+	switch strategy {
+	case "single":
+		solo := orchestrator.NewSolo(agents.NewSoloCoder(provider, loader), true, slog.Default())
+		return solo.Run(ctx, task)
+	default: // "pipeline"
+		orch := orchestrator.New(
+			agents.NewCoordinator(provider, loader),
+			agents.NewPlanner(provider, loader),
+			agents.NewCoder(provider, loader),
+			agents.NewReviewer(provider, loader),
+			orchestrator.Config{
+				MaxRevisions: maxRev,
+				RunTests:     true,
+				Logger:       slog.Default(),
+			},
+		)
+		return orch.Run(ctx, task)
+	}
+}
+
 // --- run one task on one provider -----------------------------------------
 
-func runOnce(t Task, inner llm.Provider, loader *prompts.Loader, maxRev int, artifactsDir string) Row {
+func runOnce(t Task, inner llm.Provider, loader *prompts.Loader, maxRev int, strategy string, artifactsDir string) Row {
 	row := Row{
 		TaskID:        t.ID,
 		Tier:          t.Tier,
 		TaskName:      t.Name,
 		Provider:      inner.Name(),
+		Strategy:      strategy,
 		ReviewerScore: -1,
 	}
 
 	counter := newCounting(inner)
-
-	orch := orchestrator.New(
-		agents.NewCoordinator(counter, loader),
-		agents.NewPlanner(counter, loader),
-		agents.NewCoder(counter, loader),
-		agents.NewReviewer(counter, loader),
-		orchestrator.Config{
-			MaxRevisions: maxRev,
-			RunTests:     true,
-			Logger:       slog.Default(),
-		},
-	)
 
 	task := &models.Task{
 		ID:          fmt.Sprintf("%s-%d", t.ID, time.Now().UnixMilli()),
@@ -376,7 +432,7 @@ func runOnce(t Task, inner llm.Provider, loader *prompts.Loader, maxRev int, art
 	defer cancel()
 
 	start := time.Now()
-	st, err := orch.Run(ctx, task)
+	st, err := runStrategy(ctx, strategy, counter, loader, maxRev, task)
 	row.DurationMs = time.Since(start).Milliseconds()
 
 	in, out, calls := counter.snapshot()
@@ -410,6 +466,25 @@ func runOnce(t Task, inner llm.Provider, loader *prompts.Loader, maxRev int, art
 		if artifactsDir != "" {
 			if err := dumpArtifact(artifactsDir, inner.Name(), t.ID, a); err != nil {
 				fmt.Fprintf(os.Stderr, "  warn: dump artifact %s: %v\n", t.ID, err)
+			}
+		}
+
+		// Held-out acceptance: score the implementation against the harness's own
+		// hidden test (which the coder never saw), independent of the model's
+		// self-authored tests. Run after the timed strategy so it doesn't inflate
+		// the model's latency.
+		if t.HiddenTest != "" {
+			row.HiddenPresent = true
+			hres := runner.RunHidden(ctx, a, t.HiddenTest, 90*time.Second)
+			if !hres.Skipped {
+				row.HiddenBuildOK = hres.BuildOK
+				row.HiddenTestOK = hres.BuildOK && hres.TestOK
+				switch {
+				case !hres.BuildOK:
+					row.HiddenOut = scrubPaths(truncate(hres.BuildOut, 4000))
+				case !hres.TestOK:
+					row.HiddenOut = scrubPaths(truncate(hres.TestOut, 4000))
+				}
 			}
 		}
 	}
@@ -535,8 +610,9 @@ func orderedProviderNames(provs map[string]llm.Provider) []string {
 // so header and records can never drift apart.
 func csvHeader() []string {
 	return []string{
-		"task_id", "tier", "task_name", "provider",
+		"task_id", "tier", "task_name", "provider", "strategy",
 		"build_ok", "tests_present", "test_ok",
+		"hidden_present", "hidden_build_ok", "hidden_test_ok",
 		"reviewer_score", "approved", "false_approvals", "revisions_used",
 		"duration_ms", "input_tokens", "output_tokens",
 		"llm_calls", "cost_usd", "error",
@@ -582,10 +658,13 @@ func (s *rowStreamer) close() {
 // csvHeader().
 func csvRecord(r Row) []string {
 	return []string{
-		r.TaskID, r.Tier, r.TaskName, r.Provider,
+		r.TaskID, r.Tier, r.TaskName, r.Provider, r.Strategy,
 		strconv.FormatBool(r.BuildOK),
 		strconv.FormatBool(r.TestsPresent),
 		strconv.FormatBool(r.TestOK),
+		strconv.FormatBool(r.HiddenPresent),
+		strconv.FormatBool(r.HiddenBuildOK),
+		strconv.FormatBool(r.HiddenTestOK),
 		strconv.Itoa(r.ReviewerScore),
 		strconv.FormatBool(r.Approved),
 		strconv.Itoa(r.FalseApproval),
@@ -622,6 +701,7 @@ type runMeta struct {
 	OS            string            `json:"os"`
 	Arch          string            `json:"arch"`
 	MaxRevisions  int               `json:"max_revisions"`
+	Strategies    []string          `json:"strategies"`
 	TasksGlob     string            `json:"tasks_glob"`
 	TaskIDs       []string          `json:"task_ids"`
 	Providers     []string          `json:"providers"`
@@ -686,14 +766,16 @@ func writeMarkdown(path string, rows []Row, totalElapsed time.Duration) error {
 	// --- Provider rollup ---
 	fmt.Fprintln(f, "## Provider rollup")
 	fmt.Fprintln(f)
-	fmt.Fprintln(f, "| Provider | Build pass | Test pass | Avg score | Avg revisions | False approvals | Avg latency | Total cost |")
-	fmt.Fprintln(f, "|---|---:|---:|---:|---:|---:|---:|---:|")
-	for _, p := range providers {
-		s := summarise(rows, p)
-		fmt.Fprintf(f, "| `%s` | %d/%d | %d/%d | %.1f | %.1f | %d | %s | $%.4f |\n",
-			p,
+	pairs := providerStrategyPairs(rows)
+	fmt.Fprintln(f, "| Provider | Strategy | Build pass | Test pass (self) | Hidden pass | Avg score | Avg revisions | False approvals | Avg latency | Total cost |")
+	fmt.Fprintln(f, "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+	for _, ps := range pairs {
+		s := summarise(rows, ps.provider, ps.strategy)
+		fmt.Fprintf(f, "| `%s` | %s | %d/%d | %d/%d | %s | %.1f | %.1f | %d | %s | $%.4f |\n",
+			ps.provider, ps.strategy,
 			s.buildPass, s.total,
 			s.testPass, s.total,
+			hiddenCell(s),
 			s.avgScore, s.avgRevisions,
 			s.falseApprovals,
 			fmtMs(s.avgDurationMs),
@@ -701,10 +783,16 @@ func writeMarkdown(path string, rows []Row, totalElapsed time.Duration) error {
 		)
 	}
 	fmt.Fprintln(f)
+	fmt.Fprintln(f, "**Strategy** = `pipeline` (Coordinator→Planner→Coder→Reviewer with a revision loop) or "+
+		"`single` (one Coder call, no plan/review/revision). Running both is the ablation for whether the extra "+
+		"agents actually beat one well-prompted call — same provider, same tasks, same objective scoring. ")
 	fmt.Fprintln(f, "**Build pass** = `go build ./...` succeeded on the final artifact. ")
-	fmt.Fprintln(f, "**Test pass** = `go test ./...` also succeeded AND the artifact contained at least one `*_test.go` file. ")
-	fmt.Fprintln(f, "**Avg score** = mean of the reviewer's final 0–10 score. ")
-	fmt.Fprintln(f, "**Avg revisions** = mean coder→reviewer cycles used (0 = approved first try; max = revision cap hit). ")
+	fmt.Fprintln(f, "**Test pass (self)** = `go test ./...` passed AND the artifact shipped a `*_test.go` file — i.e. the model's *own* tests passed. ")
+	fmt.Fprintln(f, "**Hidden pass** = the implementation passed a held-out, harness-authored acceptance test the coder never saw "+
+		"(over the tasks that have one). This is the metric that cannot be gamed: where **Hidden pass < Test pass (self)**, the "+
+		"model wrote tests too weak to catch its own bugs. `—` means no task in that row carried a hidden test. ")
+	fmt.Fprintln(f, "**Avg score** = mean of the reviewer's final 0–10 score (single-call rows have no reviewer, shown as 0.0). ")
+	fmt.Fprintln(f, "**Avg revisions** = mean coder→reviewer cycles used (0 = approved first try; max = revision cap hit; always 0 for single). ")
 	fmt.Fprintln(f, "**False approvals** = times the reviewer approved an artifact whose `go build`/`go test` was still red, "+
 		"forcing the orchestrator's objective gate to override the approval and keep revising. A non-zero count means the "+
 		"LLM reviewer cannot be trusted as the sole quality gate — the whole reason build/test is scored independently.")
@@ -720,26 +808,30 @@ func writeMarkdown(path string, rows []Row, totalElapsed time.Duration) error {
 			continue
 		}
 		fmt.Fprintf(f, "### %s\n\n", strings.Title(tier)) //nolint:staticcheck // SA1019: deprecation acknowledged
-		fmt.Fprintln(f, "| Task | Provider | Build | Test | Score | Revs | Latency | Cost |")
-		fmt.Fprintln(f, "|---|---|:---:|:---:|---:|---:|---:|---:|")
-		// Sort: by task id, then provider with mock first
+		fmt.Fprintln(f, "| Task | Provider | Strategy | Build | Test | Hidden | Score | Revs | Latency | Cost |")
+		fmt.Fprintln(f, "|---|---|---|:---:|:---:|:---:|---:|---:|---:|---:|")
+		// Sort: by task id, then provider (mock first), then strategy (pipeline first)
 		sort.SliceStable(tierRows, func(i, j int) bool {
 			if tierRows[i].TaskID != tierRows[j].TaskID {
 				return tierRows[i].TaskID < tierRows[j].TaskID
 			}
-			if tierRows[i].Provider == "mock" {
-				return true
+			if tierRows[i].Provider != tierRows[j].Provider {
+				if tierRows[i].Provider == "mock" {
+					return true
+				}
+				if tierRows[j].Provider == "mock" {
+					return false
+				}
+				return tierRows[i].Provider < tierRows[j].Provider
 			}
-			if tierRows[j].Provider == "mock" {
-				return false
-			}
-			return tierRows[i].Provider < tierRows[j].Provider
+			return tierRows[i].Strategy < tierRows[j].Strategy // "pipeline" < "single"
 		})
 		for _, r := range tierRows {
-			fmt.Fprintf(f, "| %s | `%s` | %s | %s | %s | %d | %s | $%.4f |\n",
-				r.TaskName, r.Provider,
+			fmt.Fprintf(f, "| %s | `%s` | %s | %s | %s | %s | %s | %d | %s | $%.4f |\n",
+				r.TaskName, r.Provider, r.Strategy,
 				tickFor(r.BuildOK, r.Error != ""),
 				tickForTest(r),
+				tickForHidden(r),
 				scoreCell(r),
 				r.RevisionsUsed,
 				fmtMs(float64(r.DurationMs)),
@@ -766,7 +858,8 @@ func writeFailureAnalysis(f io.Writer, rows []Row) {
 		if r.Provider == "mock" {
 			continue
 		}
-		if r.Error != "" || !r.BuildOK || (r.TestsPresent && !r.TestOK) {
+		if r.Error != "" || !r.BuildOK || (r.TestsPresent && !r.TestOK) ||
+			(r.HiddenPresent && r.BuildOK && !r.HiddenTestOK) {
 			failures = append(failures, r)
 		}
 	}
@@ -787,12 +880,15 @@ func writeFailureAnalysis(f io.Writer, rows []Row) {
 		if failures[i].Provider != failures[j].Provider {
 			return failures[i].Provider < failures[j].Provider
 		}
+		if failures[i].Strategy != failures[j].Strategy {
+			return failures[i].Strategy < failures[j].Strategy
+		}
 		return failures[i].TaskID < failures[j].TaskID
 	})
 
 	for _, r := range failures {
 		stage, evidence := classifyFailure(r)
-		fmt.Fprintf(f, "### `%s` — %s\n\n", r.Provider, r.TaskName)
+		fmt.Fprintf(f, "### `%s` (%s) — %s\n\n", r.Provider, r.Strategy, r.TaskName)
 		fmt.Fprintf(f, "- **Stage:** %s\n", stage)
 		fmt.Fprintf(f, "- **Revisions used:** %d", r.RevisionsUsed)
 		if r.ReviewerScore >= 0 {
@@ -820,6 +916,14 @@ func classifyFailure(r Row) (stage, evidence string) {
 	case r.TestsPresent && !r.TestOK:
 		return "built, but `go test` failed",
 			truncate(strings.TrimSpace(r.TestOut), 600)
+	case r.HiddenPresent && !r.HiddenBuildOK:
+		return "passed its own tests, but the held-out acceptance test does not compile against it " +
+				"(wrong signature or missing export — the implementation doesn't meet the spec'd contract)",
+			truncate(strings.TrimSpace(r.HiddenOut), 600)
+	case r.HiddenPresent && !r.HiddenTestOK:
+		return "passed its own tests, but FAILED the held-out acceptance test — the model's self-authored " +
+				"tests were too weak to catch a bug the hidden test exercises (self-grading gap)",
+			truncate(strings.TrimSpace(r.HiddenOut), 600)
 	default:
 		return "unknown", ""
 	}
@@ -830,16 +934,17 @@ func classifyFailure(r Row) (stage, evidence string) {
 type summary struct {
 	total                                 int
 	buildPass, testPass                   int
+	hiddenPresent, hiddenPass             int
 	falseApprovals                        int
 	avgScore, avgRevisions, avgDurationMs float64
 	totalCostUSD                          float64
 }
 
-func summarise(rows []Row, provider string) summary {
+func summarise(rows []Row, provider, strategy string) summary {
 	var s summary
 	var scoreSum, scoreN int
 	for _, r := range rows {
-		if r.Provider != provider {
+		if r.Provider != provider || r.Strategy != strategy {
 			continue
 		}
 		s.total++
@@ -848,6 +953,12 @@ func summarise(rows []Row, provider string) summary {
 		}
 		if r.TestOK && r.TestsPresent {
 			s.testPass++
+		}
+		if r.HiddenPresent {
+			s.hiddenPresent++
+			if r.HiddenTestOK {
+				s.hiddenPass++
+			}
 		}
 		s.falseApprovals += r.FalseApproval
 		if r.ReviewerScore >= 0 {
@@ -877,6 +988,44 @@ func uniqueProviders(rows []Row) []string {
 			out = append(out, r.Provider)
 		}
 	}
+	return out
+}
+
+// provStrat is one (provider, strategy) cell of the result matrix.
+type provStrat struct{ provider, strategy string }
+
+// providerStrategyPairs returns the (provider, strategy) combinations present in
+// the rows, ordered for stable reports: mock first, then providers
+// alphabetically, and within each provider the pipeline strategy before single
+// so the ablation reads pipeline-then-baseline.
+func providerStrategyPairs(rows []Row) []provStrat {
+	seen := map[provStrat]bool{}
+	var out []provStrat
+	for _, r := range rows {
+		ps := provStrat{r.Provider, r.Strategy}
+		if !seen[ps] {
+			seen[ps] = true
+			out = append(out, ps)
+		}
+	}
+	stratRank := func(s string) int {
+		if s == "single" {
+			return 1
+		}
+		return 0 // pipeline (or anything else) first
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].provider != out[j].provider {
+			if out[i].provider == "mock" {
+				return true
+			}
+			if out[j].provider == "mock" {
+				return false
+			}
+			return out[i].provider < out[j].provider
+		}
+		return stratRank(out[i].strategy) < stratRank(out[j].strategy)
+	})
 	return out
 }
 
@@ -930,6 +1079,27 @@ func scoreCell(r Row) string {
 		return "—"
 	}
 	return strconv.Itoa(r.ReviewerScore) + "/10"
+}
+
+// hiddenCell renders the held-out pass rate for a rollup group, or "—" when no
+// task in the group carried a hidden test.
+func hiddenCell(s summary) string {
+	if s.hiddenPresent == 0 {
+		return "—"
+	}
+	return fmt.Sprintf("%d/%d", s.hiddenPass, s.hiddenPresent)
+}
+
+// tickForHidden renders a single row's held-out result: ✓/✗, or "—" when the
+// task has no hidden test.
+func tickForHidden(r Row) string {
+	if !r.HiddenPresent {
+		return "—"
+	}
+	if r.HiddenTestOK {
+		return "✓"
+	}
+	return "✗"
 }
 
 func fmtMs(ms float64) string {

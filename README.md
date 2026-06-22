@@ -295,6 +295,7 @@ prompts/
   planner.tmpl       ← produces the execution plan
   coder.tmpl         ← implements the plan
   reviewer.tmpl      ← evaluates the artifact
+  solo.tmpl          ← single-call baseline (one shot, no plan/review)
 ```
 
 MuGi checks `PROMPTS_DIR` (default `prompts/`) first.  If a file is not found
