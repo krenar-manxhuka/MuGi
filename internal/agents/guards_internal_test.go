@@ -22,9 +22,9 @@ func TestGenerationProfilesAreValid(t *testing.T) {
 func TestGenerationProfileValidateRejectsBadConfig(t *testing.T) {
 	bad := []generationProfile{
 		{role: "", maxTokens: 10, attempts: 1},  // empty role
-		{role: "x", maxTokens: 0, attempts: 1},   // no token budget
-		{role: "x", maxTokens: 10, attempts: 0},  // no attempts
-		{role: "x", maxTokens: -1, attempts: 1},  // negative budget
+		{role: "x", maxTokens: 0, attempts: 1},  // no token budget
+		{role: "x", maxTokens: 10, attempts: 0}, // no attempts
+		{role: "x", maxTokens: -1, attempts: 1}, // negative budget
 	}
 	for _, p := range bad {
 		if err := p.validate(); err == nil {

@@ -161,10 +161,10 @@ func TestWorkflowStateJSONMarshal(t *testing.T) {
 
 	// Collect the serialisable parts of the state
 	snapshot := struct {
-		Task     *models.Task     `json:"task"`
-		Plan     *models.Plan     `json:"plan"`
-		Artifact *models.Artifact `json:"artifact"`
-		Reviews  []*models.Review `json:"reviews"`
+		Task     *models.Task      `json:"task"`
+		Plan     *models.Plan      `json:"plan"`
+		Artifact *models.Artifact  `json:"artifact"`
+		Reviews  []*models.Review  `json:"reviews"`
 		Log      []models.LogEntry `json:"log"`
 	}{
 		Task:     st.Task,

@@ -132,7 +132,27 @@ func (o *Orchestrator) Run(ctx context.Context, task *models.Task) (*state.Workf
 		}
 
 		review := st.LatestReview()
-		if review != nil && review.Approved {
+		approved := review != nil && review.Approved
+
+		// ── Objective gate ────────────────────────────────────────────────────
+		// A reviewer approval cannot ship an artifact whose build or tests are
+		// red. The LLM reviewer has been observed (see bench failure analysis)
+		// approving code at 9/10 that fails its own tests — even when handed the
+		// failing output. When we have a real execution signal we trust it over
+		// the reviewer's prose judgement and keep revising. This is a no-op when
+		// RunTests is off (there is no objective signal to gate on).
+		if approved && o.runTests {
+			if exec := st.GetExecResult(); !objectiveOK(exec) {
+				o.log.Warn("reviewer approved but build/test is red; overriding approval (objective gate)",
+					"build_ok", exec.BuildOK, "test_ok", exec.TestOK, "score", review.Score)
+				st.AddLog("orchestrator",
+					"objective gate: reviewer approval overridden — build/test still failing, revising")
+				st.RecordFalseApproval()
+				approved = false
+			}
+		}
+
+		if approved {
 			o.log.Info("artifact approved", "score", review.Score, "revision", review.Revision)
 			break
 		}
@@ -170,6 +190,17 @@ func (o *Orchestrator) Run(ctx context.Context, task *models.Task) (*state.Workf
 		"duration", time.Since(st.StartedAt).Round(time.Millisecond),
 	)
 	return st, nil
+}
+
+// objectiveOK reports whether the execution signal permits shipping an artifact.
+// A nil or skipped result carries no signal and must not block (e.g. non-Go
+// artifacts, or RunTests disabled). A real result ships only when both the build
+// and the tests are green.
+func objectiveOK(res *models.ExecResult) bool {
+	if res == nil || res.Skipped {
+		return true
+	}
+	return res.BuildOK && res.TestOK
 }
 
 // run calls an agent and emits structured log lines around the call.

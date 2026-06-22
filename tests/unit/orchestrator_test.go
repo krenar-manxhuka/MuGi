@@ -113,8 +113,8 @@ func TestOrchestratorPropagatesPlannerError(t *testing.T) {
 		CustomResponses: map[string]string{
 			"coordinator": "ok",
 			// planner returns invalid JSON → parse error
-			"planner": "this is not json at all",
-			"coder":   `{"summary":"x","revision":1,"files":[]}`,
+			"planner":  "this is not json at all",
+			"coder":    `{"summary":"x","revision":1,"files":[]}`,
 			"reviewer": `{"approved":true,"score":10,"feedback":"ok","revision":1}`,
 		},
 	}
@@ -194,6 +194,78 @@ func TestOrchestratorSecondPassApproves(t *testing.T) {
 	}
 	if !reviews[len(reviews)-1].Approved {
 		t.Fatal("expected final review to be approved")
+	}
+}
+
+// TestOrchestratorObjectiveGateOverridesFalseApproval verifies the objective
+// gate: when go build/test is red, a reviewer "approved" verdict must NOT ship
+// the artifact. Instead the orchestrator keeps revising up to the cap and records
+// the false approval. This is the behavioural fix for the bench finding that the
+// LLM reviewer rubber-stamps code that fails its own tests.
+func TestOrchestratorObjectiveGateOverridesFalseApproval(t *testing.T) {
+	planJSON, _ := json.Marshal(models.Plan{
+		Summary: "plan", Steps: []models.Step{{ID: 1, Title: "implement"}},
+	})
+	// Compiles cleanly, but the test asserts a falsehood so `go test` fails.
+	artifactJSON, _ := json.Marshal(models.Artifact{
+		Summary:  "adder",
+		Revision: 1,
+		Files: []models.File{
+			{Path: "go.mod", Lang: "text", Content: "module generated\n\ngo 1.21\n"},
+			{Path: "add.go", Lang: "go", Content: "package main\n\nfunc Add(a, b int) int { return a + b }\n\nfunc main() {}\n"},
+			{Path: "add_test.go", Lang: "go", Content: "package main\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {\n\tif Add(1, 1) != 3 {\n\t\tt.Fatal(\"boom\")\n\t}\n}\n"},
+		},
+	})
+	// The reviewer always approves at 9/10 — exactly the failure mode under test.
+	approve, _ := json.Marshal(models.Review{
+		Approved: true, Score: 9, Feedback: "looks great", Revision: 1,
+	})
+
+	provider := &llm.MockProvider{
+		CustomResponses: map[string]string{
+			"you are the coordinator agent": "ok",
+			"you are the planner agent":     string(planJSON),
+			"you are the coder agent":       string(artifactJSON),
+			"you are the reviewer agent":    string(approve),
+		},
+	}
+
+	loader := prompts.NewLoader("")
+	maxRevisions := 2
+	orch := orchestrator.New(
+		agents.NewCoordinator(provider, loader),
+		agents.NewPlanner(provider, loader),
+		agents.NewCoder(provider, loader),
+		agents.NewReviewer(provider, loader),
+		orchestrator.Config{MaxRevisions: maxRevisions, RunTests: true},
+	)
+
+	st, err := orch.Run(context.Background(), newTask("Add two numbers"))
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if st.GetStatus() != models.StatusCompleted {
+		t.Fatalf("expected completed, got %s", st.GetStatus())
+	}
+
+	exec := st.GetExecResult()
+	if exec == nil || exec.Skipped {
+		t.Fatalf("expected a real exec result, got %+v", exec)
+	}
+	if !exec.BuildOK {
+		t.Fatalf("precondition: artifact should build; build output: %s", exec.BuildOut)
+	}
+	if exec.TestOK {
+		t.Fatal("precondition: the artifact's tests were expected to FAIL")
+	}
+
+	if st.FalseApprovals() < 1 {
+		t.Fatalf("objective gate should have recorded >=1 false approval, got %d", st.FalseApprovals())
+	}
+	// Despite the reviewer approving, the gate must have driven the loop to the cap.
+	iter, _, _ := st.Snapshot()
+	if iter < maxRevisions {
+		t.Fatalf("expected the gate to use all %d revisions, got %d", maxRevisions, iter)
 	}
 }
 

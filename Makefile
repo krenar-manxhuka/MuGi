@@ -11,7 +11,7 @@ endif
 
 RUN := ./$(BINARY)
 
-.PHONY: build run demo run-anthropic run-openai run-ollama test test-verbose test-coverage fmt vet clean help
+.PHONY: build run demo run-anthropic run-openai run-ollama test test-verbose test-coverage test-race bench-mock ci fmt vet clean help
 
 ## build: compile the binary
 build:
@@ -53,6 +53,18 @@ test-coverage:
 	$(GO) test -coverprofile=coverage.out ./...
 	$(GO) tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report written to coverage.html"
+
+## test-race: run all tests with the race detector (as CI does)
+test-race:
+	$(GO) test -race ./...
+
+## bench-mock: golden harness baseline — runs the mock provider end to end.
+## Must stay all-green (build+test pass, zero false approvals); no API key needed.
+bench-mock:
+	$(GO) run ./cmd/bench -providers mock -quick
+
+## ci: run the same gates CI runs (vet, build, race tests, mock bench)
+ci: vet build test-race bench-mock
 
 ## fmt: format all Go source files
 fmt:

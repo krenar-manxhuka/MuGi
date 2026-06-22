@@ -417,3 +417,6 @@ output/
 
 # Bench -keep-artifacts dumps (model-generated source, often non-compiling)
 bench/results*/_artifacts/
+
+# Local planning/strategy notes — kept on disk, never committed
+MUgi_Career_Engineering_Roadmap.md

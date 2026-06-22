@@ -19,8 +19,10 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -75,6 +77,7 @@ type Row struct {
 	TestOK        bool    `json:"test_ok"`
 	ReviewerScore int     `json:"reviewer_score"` // -1 if no review
 	Approved      bool    `json:"approved"`
+	FalseApproval int     `json:"false_approvals"` // reviewer approvals the objective gate overrode (build/test red)
 	RevisionsUsed int     `json:"revisions_used"`
 	DurationMs    int64   `json:"duration_ms"`
 	InputTokens   int     `json:"input_tokens"`
@@ -250,6 +253,13 @@ func main() {
 	fmt.Fprintf(os.Stderr, "running %d tasks × %d providers = %d runs (maxRevisions=%d)\n\n",
 		len(tasks), len(provs), totalRuns, *maxRev)
 
+	// Stream rows to results.csv as they finish so a crash mid-run keeps the
+	// rows completed so far. The JSON/Markdown reports are rendered at the end.
+	streamer, err := newRowStreamer(filepath.Join(*outDir, "results.csv"))
+	if err != nil {
+		die("open results.csv for streaming: %v", err)
+	}
+
 	var rows []Row
 	startedAll := time.Now()
 	completed := 0
@@ -262,22 +272,40 @@ func main() {
 
 			row := runOnce(t, p, loader, *maxRev, artifactsDir)
 			rows = append(rows, row)
+			streamer.add(row)
 
 			outcome := "ok"
 			if row.Error != "" {
 				outcome = "ERR"
 			}
-			fmt.Fprintf(os.Stderr, "%s  build=%v test=%v score=%d rev=%d %dms $%.4f\n",
+			fmt.Fprintf(os.Stderr, "%s  build=%v test=%v score=%d rev=%d fa=%d %dms $%.4f\n",
 				outcome, row.BuildOK, row.TestOK, row.ReviewerScore,
-				row.RevisionsUsed, row.DurationMs, row.CostUSD)
+				row.RevisionsUsed, row.FalseApproval, row.DurationMs, row.CostUSD)
 		}
 	}
+	streamer.close()
 
 	totalElapsed := time.Since(startedAll).Round(time.Second)
 	fmt.Fprintf(os.Stderr, "\ndone in %s\n", totalElapsed)
 
-	if err := writeCSV(filepath.Join(*outDir, "results.csv"), rows); err != nil {
-		die("write CSV: %v", err)
+	sha, dirty := gitState()
+	meta := runMeta{
+		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+		GitSHA:        sha,
+		GitDirty:      dirty,
+		GoVersion:     runtime.Version(),
+		OS:            runtime.GOOS,
+		Arch:          runtime.GOARCH,
+		MaxRevisions:  *maxRev,
+		TasksGlob:     *tasksGlob,
+		TaskIDs:       taskIDs(tasks),
+		Providers:     orderedProviderNames(provs),
+		ProviderNames: providerModelNames(provs),
+		TotalRuns:     len(rows),
+		ElapsedSec:    totalElapsed.Seconds(),
+	}
+	if err := writeRunJSON(filepath.Join(*outDir, "run.json"), meta); err != nil {
+		die("write run.json: %v", err)
 	}
 	if err := writeJSON(filepath.Join(*outDir, "summary.json"), rows); err != nil {
 		die("write JSON: %v", err)
@@ -286,7 +314,30 @@ func main() {
 		die("write Markdown: %v", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "wrote %s/{results.csv, summary.json, RESULTS.md}\n", *outDir)
+	fmt.Fprintf(os.Stderr, "wrote %s/{results.csv, summary.json, RESULTS.md, run.json}\n", *outDir)
+	if dirty {
+		fmt.Fprintln(os.Stderr, "note: working tree was dirty at run time (run.json git_dirty=true)")
+	}
+}
+
+// taskIDs returns the ids of the tasks actually run, for the provenance stamp.
+func taskIDs(tasks []Task) []string {
+	out := make([]string, 0, len(tasks))
+	for _, t := range tasks {
+		out = append(out, t.ID)
+	}
+	return out
+}
+
+// providerModelNames maps each CLI provider name to the fully-qualified model
+// name its Provider reports (e.g. "sonnet" → "anthropic/claude-sonnet-4-6"), so
+// run.json records exactly which model produced each row.
+func providerModelNames(provs map[string]llm.Provider) map[string]string {
+	out := make(map[string]string, len(provs))
+	for cli, p := range provs {
+		out[cli] = p.Name()
+	}
+	return out
 }
 
 // --- run one task on one provider -----------------------------------------
@@ -366,6 +417,7 @@ func runOnce(t Task, inner llm.Provider, loader *prompts.Loader, maxRev int, art
 		row.ReviewerScore = rev.Score
 		row.Approved = rev.Approved
 	}
+	row.FalseApproval = st.FalseApprovals()
 	iter, _, _ := st.Snapshot()
 	row.RevisionsUsed = iter
 
@@ -479,47 +531,72 @@ func orderedProviderNames(provs map[string]llm.Provider) []string {
 
 // --- writers --------------------------------------------------------------
 
-func writeCSV(path string, rows []Row) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	w := csv.NewWriter(f)
-	defer w.Flush()
-
-	header := []string{
+// csvHeader is the column order for results.csv, shared by the streaming writer
+// so header and records can never drift apart.
+func csvHeader() []string {
+	return []string{
 		"task_id", "tier", "task_name", "provider",
 		"build_ok", "tests_present", "test_ok",
-		"reviewer_score", "approved", "revisions_used",
+		"reviewer_score", "approved", "false_approvals", "revisions_used",
 		"duration_ms", "input_tokens", "output_tokens",
 		"llm_calls", "cost_usd", "error",
 	}
-	if err := w.Write(header); err != nil {
-		return err
+}
+
+// rowStreamer appends each result row to results.csv the moment it completes and
+// fsyncs, so a crash (or an OOM-kill, which the README documents happening on
+// local models) keeps every row finished so far instead of discarding the whole
+// run. The full JSON/Markdown reports are still rendered once at the end.
+type rowStreamer struct {
+	f *os.File
+	w *csv.Writer
+}
+
+func newRowStreamer(path string) (*rowStreamer, error) {
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, err
 	}
-	for _, r := range rows {
-		err := w.Write([]string{
-			r.TaskID, r.Tier, r.TaskName, r.Provider,
-			strconv.FormatBool(r.BuildOK),
-			strconv.FormatBool(r.TestsPresent),
-			strconv.FormatBool(r.TestOK),
-			strconv.Itoa(r.ReviewerScore),
-			strconv.FormatBool(r.Approved),
-			strconv.Itoa(r.RevisionsUsed),
-			strconv.FormatInt(r.DurationMs, 10),
-			strconv.Itoa(r.InputTokens),
-			strconv.Itoa(r.OutputTokens),
-			strconv.Itoa(r.LLMCalls),
-			strconv.FormatFloat(r.CostUSD, 'f', 6, 64),
-			r.Error,
-		})
-		if err != nil {
-			return err
-		}
+	w := csv.NewWriter(f)
+	if err := w.Write(csvHeader()); err != nil {
+		_ = f.Close()
+		return nil, err
 	}
-	return nil
+	w.Flush()
+	_ = f.Sync()
+	return &rowStreamer{f: f, w: w}, nil
+}
+
+func (s *rowStreamer) add(r Row) {
+	_ = s.w.Write(csvRecord(r))
+	s.w.Flush()
+	_ = s.f.Sync() // durability: survive a crash on the very next run
+}
+
+func (s *rowStreamer) close() {
+	s.w.Flush()
+	_ = s.f.Close()
+}
+
+// csvRecord renders a single Row as a CSV record. Column order must match
+// csvHeader().
+func csvRecord(r Row) []string {
+	return []string{
+		r.TaskID, r.Tier, r.TaskName, r.Provider,
+		strconv.FormatBool(r.BuildOK),
+		strconv.FormatBool(r.TestsPresent),
+		strconv.FormatBool(r.TestOK),
+		strconv.Itoa(r.ReviewerScore),
+		strconv.FormatBool(r.Approved),
+		strconv.Itoa(r.FalseApproval),
+		strconv.Itoa(r.RevisionsUsed),
+		strconv.FormatInt(r.DurationMs, 10),
+		strconv.Itoa(r.InputTokens),
+		strconv.Itoa(r.OutputTokens),
+		strconv.Itoa(r.LLMCalls),
+		strconv.FormatFloat(r.CostUSD, 'f', 6, 64),
+		r.Error,
+	}
 }
 
 func writeJSON(path string, rows []Row) error {
@@ -532,6 +609,52 @@ func writeJSON(path string, rows []Row) error {
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
 	return enc.Encode(rows)
+}
+
+// runMeta is the provenance stamp written alongside each results set. It records
+// exactly what code and which models produced the numbers, so a committed result
+// is reproducible rather than an anonymous table.
+type runMeta struct {
+	GeneratedAt   string            `json:"generated_at"`
+	GitSHA        string            `json:"git_sha"`
+	GitDirty      bool              `json:"git_dirty"`
+	GoVersion     string            `json:"go_version"`
+	OS            string            `json:"os"`
+	Arch          string            `json:"arch"`
+	MaxRevisions  int               `json:"max_revisions"`
+	TasksGlob     string            `json:"tasks_glob"`
+	TaskIDs       []string          `json:"task_ids"`
+	Providers     []string          `json:"providers"`
+	ProviderNames map[string]string `json:"provider_model_names"` // cli name → Provider.Name()
+	TotalRuns     int               `json:"total_runs"`
+	ElapsedSec    float64           `json:"elapsed_seconds"`
+}
+
+func writeRunJSON(path string, m runMeta) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	return enc.Encode(m)
+}
+
+// gitState returns the current commit SHA and whether the working tree is dirty.
+// On any failure (not a git repo, git not installed) it returns ("unknown", false)
+// rather than aborting the run — provenance is best-effort, not a hard dependency.
+func gitState() (sha string, dirty bool) {
+	out, err := exec.Command("git", "rev-parse", "HEAD").Output()
+	if err != nil {
+		return "unknown", false
+	}
+	sha = strings.TrimSpace(string(out))
+	status, err := exec.Command("git", "status", "--porcelain").Output()
+	if err != nil {
+		return sha, false
+	}
+	return sha, strings.TrimSpace(string(status)) != ""
 }
 
 // writeMarkdown renders two views: a per-task detail table grouped by tier,
@@ -563,15 +686,16 @@ func writeMarkdown(path string, rows []Row, totalElapsed time.Duration) error {
 	// --- Provider rollup ---
 	fmt.Fprintln(f, "## Provider rollup")
 	fmt.Fprintln(f)
-	fmt.Fprintln(f, "| Provider | Build pass | Test pass | Avg score | Avg revisions | Avg latency | Total cost |")
-	fmt.Fprintln(f, "|---|---:|---:|---:|---:|---:|---:|")
+	fmt.Fprintln(f, "| Provider | Build pass | Test pass | Avg score | Avg revisions | False approvals | Avg latency | Total cost |")
+	fmt.Fprintln(f, "|---|---:|---:|---:|---:|---:|---:|---:|")
 	for _, p := range providers {
 		s := summarise(rows, p)
-		fmt.Fprintf(f, "| `%s` | %d/%d | %d/%d | %.1f | %.1f | %s | $%.4f |\n",
+		fmt.Fprintf(f, "| `%s` | %d/%d | %d/%d | %.1f | %.1f | %d | %s | $%.4f |\n",
 			p,
 			s.buildPass, s.total,
 			s.testPass, s.total,
 			s.avgScore, s.avgRevisions,
+			s.falseApprovals,
 			fmtMs(s.avgDurationMs),
 			s.totalCostUSD,
 		)
@@ -580,7 +704,10 @@ func writeMarkdown(path string, rows []Row, totalElapsed time.Duration) error {
 	fmt.Fprintln(f, "**Build pass** = `go build ./...` succeeded on the final artifact. ")
 	fmt.Fprintln(f, "**Test pass** = `go test ./...` also succeeded AND the artifact contained at least one `*_test.go` file. ")
 	fmt.Fprintln(f, "**Avg score** = mean of the reviewer's final 0–10 score. ")
-	fmt.Fprintln(f, "**Avg revisions** = mean coder→reviewer cycles used (0 = approved first try; max = revision cap hit).")
+	fmt.Fprintln(f, "**Avg revisions** = mean coder→reviewer cycles used (0 = approved first try; max = revision cap hit). ")
+	fmt.Fprintln(f, "**False approvals** = times the reviewer approved an artifact whose `go build`/`go test` was still red, "+
+		"forcing the orchestrator's objective gate to override the approval and keep revising. A non-zero count means the "+
+		"LLM reviewer cannot be trusted as the sole quality gate — the whole reason build/test is scored independently.")
 	fmt.Fprintln(f)
 
 	// --- Per-task detail ---
@@ -703,6 +830,7 @@ func classifyFailure(r Row) (stage, evidence string) {
 type summary struct {
 	total                                 int
 	buildPass, testPass                   int
+	falseApprovals                        int
 	avgScore, avgRevisions, avgDurationMs float64
 	totalCostUSD                          float64
 }
@@ -721,6 +849,7 @@ func summarise(rows []Row, provider string) summary {
 		if r.TestOK && r.TestsPresent {
 			s.testPass++
 		}
+		s.falseApprovals += r.FalseApproval
 		if r.ReviewerScore >= 0 {
 			scoreSum += r.ReviewerScore
 			scoreN++

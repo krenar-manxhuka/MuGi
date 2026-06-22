@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: build · vet · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt (fail on unformatted files)
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test (race detector)
+        run: go test -race ./...
+
+      - name: Bench smoke (mock provider, golden harness baseline)
+        # The mock run is a contract test for the harness itself: it must stay
+        # all-green (12/12 build+test, 0 false approvals). No API key required.
+        run: go run ./cmd/bench -providers mock -quick -out "${RUNNER_TEMP}/bench-ci"

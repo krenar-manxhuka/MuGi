@@ -19,9 +19,15 @@ type WorkflowState struct {
 	Reviews    []*models.Review
 	ExecResult *models.ExecResult
 	Status     models.WorkflowStatus
-	Iteration int
-	MaxIter   int
-	Log       []models.LogEntry
+	Iteration  int
+	MaxIter    int
+	Log        []models.LogEntry
+
+	// falseApprovals counts how many times the reviewer approved an artifact
+	// whose build/test signal was red, forcing the orchestrator's objective gate
+	// to override the approval and keep revising. It is a quality signal about the
+	// reviewer, surfaced by the bench harness.
+	falseApprovals int
 
 	StartedAt   time.Time
 	CompletedAt *time.Time
@@ -131,6 +137,23 @@ func (s *WorkflowState) MaxIterReached() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.Iteration >= s.MaxIter
+}
+
+// --- reviewer false approvals ---
+
+// RecordFalseApproval increments the count of reviewer approvals that the
+// objective gate overrode because build/test was still failing.
+func (s *WorkflowState) RecordFalseApproval() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.falseApprovals++
+}
+
+// FalseApprovals returns how many times the reviewer false-approved a red artifact.
+func (s *WorkflowState) FalseApprovals() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.falseApprovals
 }
 
 // --- log ---

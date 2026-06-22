@@ -55,7 +55,7 @@ type openAIReq struct {
 	Messages    []openAIMsg `json:"messages"`
 	MaxTokens   int         `json:"max_tokens,omitempty"`
 	Temperature float64     `json:"temperature,omitempty"`
-	Stream      bool        `json:"stream"`          // always false; prevents chunked stalls
+	Stream      bool        `json:"stream"`            // always false; prevents chunked stalls
 	NumCtx      int         `json:"num_ctx,omitempty"` // Ollama extension: context window size
 }
 
