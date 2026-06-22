@@ -24,16 +24,29 @@ func SafeRelPath(p string) error {
 	if filepath.IsAbs(p) || strings.HasPrefix(p, "/") || strings.HasPrefix(p, `\`) {
 		return fmt.Errorf("fsafe: rooted/absolute path not allowed: %q", p)
 	}
-	// Reject Windows volume names: "C:\x" (absolute), "C:x" (drive-relative), and
-	// UNC "\\server\share". VolumeName is empty on Unix, so this is a no-op there.
-	if filepath.VolumeName(p) != "" {
-		return fmt.Errorf("fsafe: volume-qualified path not allowed: %q", p)
+	// Reject Windows volume/drive paths on EVERY OS, not just Windows.
+	// filepath.IsAbs and filepath.VolumeName only recognise a drive letter
+	// ("C:\x", "C:/x", "C:x") or UNC volume as absolute *on Windows*; on a Linux
+	// host such a path is just a relative name with a colon and would otherwise
+	// slip through (a cross-platform CI run caught exactly this). A contained
+	// relative path never carries a drive letter.
+	if filepath.VolumeName(p) != "" || hasDriveLetter(p) {
+		return fmt.Errorf("fsafe: volume/drive-qualified path not allowed: %q", p)
 	}
 	clean := filepath.Clean(filepath.FromSlash(p))
 	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("fsafe: path escapes base: %q", p)
 	}
 	return nil
+}
+
+// hasDriveLetter reports whether p starts with a Windows drive-letter prefix
+// (an ASCII letter followed by ':'), e.g. "C:", "c:". This is recognised on all
+// operating systems so a model-emitted artifact path with a drive letter is
+// rejected regardless of the host the harness runs on.
+func hasDriveLetter(p string) bool {
+	return len(p) >= 2 && p[1] == ':' &&
+		((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z'))
 }
 
 // SafeJoin joins base and a relative path p, guaranteeing the result stays

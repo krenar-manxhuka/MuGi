@@ -1,7 +1,6 @@
 package fsafe
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -15,7 +14,12 @@ func TestSafeRelPathRejectsTraversalAndAbsolute(t *testing.T) {
 		"a/../../b",
 		"/etc/passwd",
 		`\windows\system32`,
-		filepath.Join("C:", "abs", "path"), // absolute on Windows
+		// Windows drive-letter paths must be rejected on every OS, not just
+		// Windows — literal strings so the test means the same on Linux and
+		// Windows (filepath.Join would resolve these differently per platform).
+		"C:/abs/path",
+		`C:\abs\path`,
+		"C:abs",
 	}
 	for _, p := range bad {
 		if err := SafeRelPath(p); err == nil {
