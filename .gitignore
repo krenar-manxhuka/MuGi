@@ -406,9 +406,10 @@ FodyWeavers.xsd
 # Local environment — never commit real API keys
 .env
 
-# Go build output (root-level binaries only, not cmd/mugi/ source)
+# Go build output (root-level binaries only, not cmd/ source or the bench/ dir)
 /mugi
 /mugi.exe
+/bench.exe
 coverage.out
 coverage.html
 
