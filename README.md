@@ -34,6 +34,8 @@ and tested (`go run ./cmd/bench -providers sonnet,haiku -strategy both`, 2026-06
 
 ## What the harness measured
 
+> **Fuller write-up:** [Does multi-agent orchestration beat a single LLM call? I measured it.](docs/does-multi-agent-orchestration-help.md)
+
 ### 1. The LLM reviewer rubber-stamps code that fails its own tests
 
 Across the two pipeline runs, the reviewer agent **approved failing artifacts 9
