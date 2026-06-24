@@ -412,12 +412,19 @@ FodyWeavers.xsd
 /bench.exe
 /index
 /index.exe
+/swebench-recall
+/swebench-recall.exe
 
 # Embedding cache written by cmd/index (content-addressed; safe to delete)
 .embed-cache.json
 *.embed-cache.json
 coverage.out
 coverage.html
+
+# recall@k run outputs written by cmd/swebench-recall (results + dataset slices)
+recall.json
+*.recall.json
+slice.jsonl
 
 # Artifact output directory
 output/

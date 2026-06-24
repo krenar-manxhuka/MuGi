@@ -31,6 +31,13 @@ EMBED_BASE_URL=http://localhost:11434/v1 EMBED_MODEL=nomic-embed-text \
   go run ./cmd/index -mode hybrid -q "graceful shutdown" -k 5
 ```
 
+## Measuring recall on real instances
+
+[`internal/retrievaleval`](../retrievaleval) wires the `recall@k` metric here to
+SWE-bench instances: it checks out each repo at its base commit, indexes it, and
+scores whether retrieval surfaces the files the gold patch changed — the free
+tuning signal. Run it via `cmd/swebench-recall` (lexical is $0).
+
 ## Next (M3)
 
 Wire retrieval into the agent → `predictions.jsonl` → the official SWE-bench
