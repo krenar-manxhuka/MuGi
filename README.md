@@ -1,426 +1,234 @@
-# MuGi — Multi-Agent Software Builder
+# MuGi — an execution-grounded benchmark for code-generation agents
 
-MuGi is a **Go-native, provider-agnostic multi-agent pipeline** that turns a
-one-line task description into a structured plan, working code, and a
-peer-reviewed result — all driven by four collaborating LLM agents. Every
-generated artifact is compiled and tested before the reviewer sees it, so the
-review is grounded in real execution output, not LLM speculation.
+MuGi runs code-generation agents against well-specified programming tasks,
+**compiles and tests every artifact they produce**, scores it against
+**held-out tests the agent never sees**, and reports resolution rate, cost, and
+latency. It ships a multi-agent pipeline (Coordinator → Planner → Coder →
+Reviewer) as the reference agent — but the interesting part isn't the agent, it's
+measuring *honestly* whether that orchestration is worth its cost, and catching
+the ways LLM-driven workflows quietly lie about their own quality.
+
+It's written in Go, is provider-agnostic (Anthropic, OpenAI-compatible, Ollama,
+or a deterministic mock), and runs the whole pipeline offline with no API key.
 
 ---
 
-## Benchmark — execution-grounded evaluation
+## Headline results
 
-The heart of this repo is an **eval harness** (`cmd/bench`) that runs the full
-pipeline against 12 small Go tasks (4 easy / 5 medium / 3 hard), each with
-explicit function signatures and required test cases, and **compiles and tests
-every generated artifact** before scoring it. The goal isn't a leaderboard — it
-is to surface *where and how* models fail, grounded in real `go build` /
-`go test` output rather than an LLM's self-assessment.
+One run, two frontier models, two orchestration strategies, every artifact built
+and tested (`go run ./cmd/bench -providers sonnet,haiku -strategy both`, 2026-06-24):
 
-Real numbers from a single run on **2026-06-21**
-(`go run ./cmd/bench -providers mock,haiku,sonnet`):
+| Provider | Strategy | Build | Test (self) | Hidden | False approvals | Avg latency | Cost | $/solved |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| `claude-haiku-4-5` | pipeline | 12/12 | 11/12 | 5/5 | **5** | 79.0s | $0.64 | $0.058 |
+| `claude-haiku-4-5` | single   | 11/12 |  7/12 | 5/5 | 0 | 27.0s | $0.22 | $0.031 |
+| `claude-sonnet-4-6` | pipeline | 12/12 | 10/12 | 5/5 | **4** | 130.3s | $1.43 | $0.143 |
+| `claude-sonnet-4-6` | single   | 12/12 | **11/12** | 5/5 | 0 | 26.9s | $0.38 | $0.034 |
 
-| Provider | Build pass | Test pass | Avg score | Avg revisions | Avg latency | Total cost |
-|---|---:|---:|---:|---:|---:|---:|
-| `mock` (harness baseline) | 12/12 | 12/12 | 9.0 | 0.0 | 8.5s | $0.0000 |
-| `anthropic/claude-haiku-4-5-20251001` | 12/12 | 8/12 | 9.2 | 0.2 | 50.2s | $0.4972 |
-| `anthropic/claude-sonnet-4-6` | 11/12 † | 10/12 | 9.4 | 0.0 | 97.9s | $1.0176 |
-| `ollama/qwen2.5-coder:7b` | _not run this cycle ‡_ | | | | | |
+*Total run cost: $2.66. Full per-task detail and captured failure output:*
+[`bench/results/RESULTS.md`](bench/results/RESULTS.md) · *raw rows:*
+[`bench/results/results.csv`](bench/results/results.csv) · *provenance:*
+[`bench/results/run.json`](bench/results/run.json).
 
-Full per-task detail and the **captured failure output** for every miss:
-[`bench/results/RESULTS.md`](bench/results/RESULTS.md) · raw rows:
-[`bench/results/results.csv`](bench/results/results.csv) · how to run:
-[`bench/README.md`](bench/README.md).
+---
 
-> **† Sonnet's one non-pass was infrastructure, not the model.** The Worker Pool
-> task errored with `unexpected EOF` from the Anthropic API after the provider's
-> retry/backoff exhausted (~5 min). The harness records it as a 💥 error row,
-> kept distinct from build/test failures (Failure mode #3). Sonnet built all 11
-> other tasks and passed tests on 10 of them — only the Expr Evaluator missed,
-> on a single `-1 * -1` edge case.
->
-> **‡ Ollama is left unrun rather than filled with stale numbers.** A full local
-> run with `qwen2.5-coder:7b` OOM-killed the host on the reviewer's large-context
-> call. Integrity rule for this table: every number comes from a run reproducible
-> from `bench/results/`; a row that can't be run cleanly is marked unrun, not
-> back-filled. To populate it, run the reviewer with a smaller context (or on a
-> larger-RAM machine) and `LLM_MODEL=qwen2.5-coder:7b go run ./cmd/bench -providers ollama`.
+## What the harness measured
 
-### Metrics
+### 1. The LLM reviewer rubber-stamps code that fails its own tests
 
-- **Build pass** — `go build ./...` succeeded on the final artifact.
-- **Test pass** — `go test ./...` also passed *and* the artifact shipped at least
-  one `*_test.go` file (so "wrote no tests" cannot score as a pass).
-- **Avg score** — mean of the reviewer agent's final 0–10 score.
-- **Avg revisions** — mean coder→reviewer cycles used (0 = approved first try; 3 = hit the cap).
-- **Avg latency** — wall-clock per task, end to end (inference + `go build` + `go test`).
-- **Total cost** — summed token usage × per-model price (the `pricing` table in `cmd/bench/main.go`).
+Across the two pipeline runs, the reviewer agent **approved failing artifacts 9
+times** (Haiku 5, Sonnet 4) — scoring them ~9/10 *while `go test` on that same
+artifact was red*, and it had been handed the failing output. Without an
+independent gate, every one of those would have shipped as "approved."
 
-### Failure modes the harness has caught
+MuGi computes `build`/`test` itself and an **objective gate** overrides the
+reviewer whenever execution is red, so a rubber-stamped artifact still surfaces as
+a failure and the loop keeps revising. The lesson is the headline: **you cannot
+delegate the quality gate to an LLM reviewer, even when you feed it the test
+results.** Eyeballing one "looks-right" program by hand reproduces exactly this
+blind spot — only scoring execution across every artifact exposes it.
 
-Each item is a methodology point — what the eval surfaced, the root cause, and
-why manual testing would have missed it.
+### 2. Does the multi-agent pipeline beat a single call? Only for the weak model.
 
-**1. The LLM reviewer approves code that fails its own tests.** In the 2026-06-21
-run, *every* Haiku artifact that failed `go test` was nonetheless **approved by
-the reviewer at 9/10** — and so was Sonnet's one test failure:
+Same model, same tasks — the full 4-agent pipeline vs. one well-prompted Coder
+call (`-strategy both`):
 
-| Task | Model | Reviewer verdict | What `go test` actually caught |
-|---|---|---|---|
-| Pub/Sub | haiku | approved · 9/10 | test file won't compile: `declared and not used: ch` |
-| Worker Pool | haiku | approved · 9/10 | `Shutdown` exceeds its deadline (`context deadline exceeded`) |
-| Expr Evaluator | haiku | approved · 9/10 | 4 correctness bugs: `.5` lexing, `1++2` not rejected, unary `+1`, wrong precedence |
-| LRU Cache | haiku | approved · 9/10 | eviction bug: `Get(1) should return false after eviction` |
-| Expr Evaluator | sonnet | approved · 9/10 | `-1 * -1` evaluates instead of erroring per the task contract |
+- **Haiku: the pipeline genuinely helped — 11/12 vs 7/12** — but at **~3× the
+  cost.** Orchestration compensates for a less capable model.
+- **Sonnet: the single call won — 11/12 vs 10/12 — at ~¼ the cost** ($0.38 vs
+  $1.43) and ⅕ the latency. (One of the pipeline's two misses was an API error,
+  not the model; even being charitable, the pipeline did no better.) On the
+  Pub/Sub task specifically, the pipeline's revision loop **took a solution a
+  single call got right and broke it**, then approved the broken version 3 times.
 
-Root cause: the reviewer **is handed the `go build` / `go test` output** (the
-orchestrator runs the artifact before the review), but its holistic "this looks
-like correct Go" judgment overrides the explicit failing signal — it approved all
-five at 9/10 anyway. **Why this matters:** you cannot delegate the quality gate to
-the LLM reviewer *even when you feed it the test results*. The harness therefore
-computes `build_ok` / `test_ok` itself, independently of the reviewer score, so a
-rubber-stamped artifact still surfaces as test ✗. (Eyeballing one "looks-right"
-program by hand reproduces exactly the reviewer's blind spot — only scoring
-execution across every artifact exposes it.) Full captured output for every row
-above: [`bench/results/RESULTS.md`](bench/results/RESULTS.md).
+**Cost per solved task tells the story: Sonnet-single $0.034, Sonnet-pipeline
+$0.143** — the orchestration is dominated for a capable model. The honest takeaway:
+*multi-agent orchestration buys capability for a weak model and little or nothing
+for a strong one, always at 3–4× the cost.* If your model is good, a single
+well-prompted call is the better engineering choice on tasks this size.
 
-**2. `runner.detectLang` silently skipped execution for every artifact.** An
-earlier version read only the *first* file's `Lang` field — which for any Go
-module is `go.mod` with `lang: "text"` — so it returned `"text"`, found no
-matching executor, and marked every artifact `Skipped`: build and test never ran.
-The eval surfaced it because build/test results were absent across *all* real
-artifacts at once, not in any single case. Root cause: detection keyed on
-`files[0]` instead of scanning for any `.go` file; fixed in
-[internal/runner/runner.go](internal/runner/runner.go) (any `.go` file ⇒ run as
-Go). **Why manual testing misses it:** a hand-run of one generated program
-compiles fine — the bug only shows up as a systematic "nothing is being executed"
-pattern across the whole suite, which is exactly what a harness makes visible.
+### 3. Held-out tests confirm the wins are real (not self-graded)
 
-**3. Infrastructure failures are kept distinct from model failures.** Sonnet's
-Worker Pool task errored with `unexpected EOF` from the Anthropic API after the
-provider's retry/backoff gave up (~5 min). The harness records that as a 💥 error
-row with no artifact — never as a build or test failure — so a dropped connection
-is never miscounted as "the model can't solve worker pools." A naive harness that
-lumped the two together would report a misleading capability number.
+`test (self)` runs the model's **own** tests — and a model can pass by writing
+weak tests. So 5 tasks carry a **`hidden_test`**: a harness-authored acceptance
+test the coder never sees, injected into the implementation and run separately.
+Every passing solution on those 5 tasks also passed its hidden test (**5/5 across
+all four configs**), so the self-reported passes there aren't gamed. Extending
+hidden coverage to the hard tasks — where the failures cluster — is the next step.
 
-**Local models (`qwen2.5-coder:7b`).** A full local run OOM-killed the host on the
-reviewer's large-context call — the reviewer prompt embeds the full artifact JSON,
-which is heavy for a 7B model on commodity hardware — which is why that row is left
-unrun. In isolated single-task smoke tests the same model produced *correct*
-FizzBuzz logic but omitted its `fmt` and `reflect` imports, so it would not
-compile: another "looks right, doesn't build" case that only execution catches.
-(Smoke-test observations, not a scored benchmark row.)
-
-> **The mock row is a contract test for the harness, not a model benchmark.** The
-> mock returns the same canned artifact for every task, so its 12/12 verifies that
-> the orchestrator, executor, and scorer agree end to end — the "all green"
-> baseline that proves the rig itself works.
-
-### Limitations & next steps
-
-An honest snapshot, not a finished eval platform. Known gaps, in priority order:
-
-1. **Single run, no repeated trials.** Model failures shift run to run, so a
-   one-shot pass rate conflates capability with nondeterminism. Next: a `-trials N`
-   flag reporting pass-rate mean ± range and flagging flaky tasks.
-2. **"Test pass" runs the model's own tests.** The coder writes both the code and
-   its tests, which can be jointly weak or wrong. Next: hold out a hidden,
-   harness-authored acceptance test per task and score against that — the strongest
-   credibility upgrade.
-3. **Execution is Go-only.** Non-Go artifacts are reported `skipped` (no signal).
-   Next: per-language runners, or scope the harness explicitly to Go.
-4. **Results persist only at the end of a run.** A crash mid-run loses completed
-   rows. Next: append each row to `results.csv` as it finishes so long runs survive
-   a failure.
-5. **Local-model row is unrun.** `qwen2.5-coder:7b` OOM'd the host on the reviewer's
-   large-context call. Next: shrink the reviewer context for local models, then run it.
+> The harness keeps **infrastructure failures distinct from model failures**: an
+> `unexpected EOF` from the API after retry/backoff is recorded as an error row,
+> never as a build/test failure, so a dropped connection is never miscounted as
+> "the model can't solve this."
 
 ---
 
 ## How it works
+
+The reference agent is the multi-agent pipeline — but it's just *one row* in the
+benchmark above, not the point of the project.
 
 ```
 User prompt
     │
     ▼
 ┌─────────────┐
-│ Coordinator │  Initialises the workflow, narrates progress, produces the final summary
+│ Coordinator │  Initialises the workflow, narrates progress, final summary
 └──────┬──────┘
-       │
        ▼
 ┌─────────────┐
-│   Planner   │  Turns the task into a structured, dependency-ordered execution plan
+│   Planner   │  Turns the task into a dependency-ordered execution plan
 └──────┬──────┘
-       │
        ▼                   ┌──────────┐
-┌─────────────┐  ──────►  │ Reviewer │  Inspects the artifact; returns structured feedback
-│    Coder    │  ◄──────  └──────────┘
-└─────────────┘
-  (loop ≤ MAX_REVISIONS times)
-       │
-       ▼
-┌─────────────┐
-│ Coordinator │  Final summary
-└─────────────┘
-       │
-       ▼
-  output/ directory
-  (artifact files written to disk)
+┌─────────────┐  build+   │ Reviewer │  Inspects the artifact + the real
+│    Coder    │  test ──► │          │  go build / go test output
+└─────────────┘  ◄─────── └──────────┘
+   (loop ≤ MAX_REVISIONS, but an OBJECTIVE GATE can override a red "approval")
 ```
 
-The **orchestrator** is pure Go — it sequences agents, enforces the revision
-cap, and manages the shared workflow state.  No agent knows about any other
-agent; they read from and write to a shared `WorkflowState` via locked methods.
-
-The **LLM layer** is a single `Provider` interface.  Every agent calls only
-`provider.Generate(ctx, req)`.  Swapping from the mock to Anthropic to Ollama
-requires zero code changes — only a single environment variable.
+- The **orchestrator** is pure Go: it sequences agents, runs `go build`/`go test`
+  on every artifact, enforces the revision cap, and applies the objective gate.
+  Agents never know about each other — they share a lock-guarded `WorkflowState`.
+- The **`-strategy single`** path skips the plan/review/revision entirely: one
+  Coder call, same objective scoring — the control for the ablation above.
+- The **LLM layer** is a single `Provider` interface; every agent calls only
+  `provider.Generate(ctx, req)`. Swapping mock → Anthropic → Ollama is one env var.
+- **Untrusted by default:** generated code is built and tested with credential
+  environment variables stripped, and every model-supplied file path is contained
+  to the run directory.
 
 ---
 
-## Quickstart (one command, no API key required)
+## Real repository-level tasks (SWE-bench Lite)
 
-```bash
-git clone <repo-url>
-cd mugi
-make run
-```
+The Go tasks above are greenfield. To measure on *real* repository changes, MuGi
+also integrates [SWE-bench](https://www.swebench.com/) Lite — apply a candidate
+patch plus the held-out `test_patch` to a real repo checkout, run the tests, and
+score the `FAIL_TO_PASS` / `PASS_TO_PASS` contract.
 
-Or without `make`:
+- The **core** (`internal/swebench`) — dataset loader, pytest/go-test log parsers,
+  scoring, and an `Environment` seam — is unit-tested offline against a local git
+  fixture (gold patch resolves, empty doesn't, garbage doesn't apply).
+- The **authoritative `% resolved` comes from the official SWE-bench harness**, not
+  a home-grown evaluator (home-grown harnesses are a known source of
+  non-reproducible numbers). MuGi's job is to produce predictions; the maintainers'
+  harness scores them.
+- [`.github/workflows/swebench.yml`](.github/workflows/swebench.yml) runs the
+  official harness on the **gold patches** for a small Lite slice on GitHub Actions
+  — a $0, no-model-calls validation that the whole rig works end to end.
+
+See [`internal/swebench/README.md`](internal/swebench/README.md) for the design.
+
+---
+
+## Quickstart (no API key required)
 
 ```bash
 go run ./cmd/mugi "Build a simple Go HTTP server with a /health endpoint"
 ```
 
-The mock provider is the default.  It returns realistic, deterministic responses
-so the full pipeline runs offline.
+The default `mock` provider returns deterministic responses so the full pipeline
+runs offline. Run the benchmark yourself:
+
+```bash
+go run ./cmd/bench -providers mock                 # offline harness self-test
+go run ./cmd/bench -providers haiku -strategy both # needs ANTHROPIC_API_KEY
+```
+
+The benchmark streams each row to `results.csv` as it finishes (crash-safe) and
+writes a `run.json` provenance stamp (git SHA, models, Go version). How to run,
+add tasks, or add providers: [`bench/README.md`](bench/README.md).
+
+---
+
+## Metrics
+
+| Column | Meaning |
+|---|---|
+| **build** | `go build ./...` passed on the final artifact |
+| **test (self)** | `go test ./...` passed on the model's *own* tests (and it shipped tests) |
+| **hidden** | passed a held-out, harness-authored acceptance test the coder never saw |
+| **false approvals** | times the reviewer approved an artifact whose build/test was red |
+| **$/solved** | total cost ÷ tasks resolved — the number that actually compares models |
+
+Every number is reproducible from `bench/results/` and stamped in `run.json`; a row
+that can't be run cleanly is marked unrun, never back-filled.
 
 ---
 
 ## Configuration
 
-Copy `.env.example` to `.env` and fill in the values you need:
-
-```bash
-cp .env.example .env
-```
+Copy `.env.example` to `.env` and set what you need:
 
 | Variable | Default | Description |
 |---|---|---|
 | `LLM_PROVIDER` | `mock` | `mock` \| `anthropic` \| `openai` \| `ollama` |
 | `LLM_MODEL` | provider default | Model name override |
 | `MAX_REVISIONS` | `3` | Max coder→reviewer cycles |
+| `MAX_LLM_CALLS` | `50` | Hard ceiling on calls per run (cost guardrail) |
 | `OUTPUT_DIR` | `output` | Where artifact files are written |
-| `PROMPTS_DIR` | `prompts` | Directory for prompt template overrides |
-
-Export variables in your shell, or prefix the command:
 
 ```bash
 LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... \
   go run ./cmd/mugi "Build a REST API in Go"
 ```
 
+Providers: **Anthropic** (`claude-sonnet-4-6`, `claude-haiku-4-5-20251001`,
+`claude-opus-4-7`), **OpenAI-compatible** (set `OPENAI_BASE_URL` for Groq /
+Together / Mistral / …), and **Ollama** (local, `OLLAMA_BASE_URL`). Prompt
+templates live in `prompts/*.tmpl` and are editable without recompiling.
+
 ---
 
-## Provider setup
+## Project layout
 
-### Mock (default)
+```
+cmd/
+  mugi/             CLI entrypoint (run the pipeline on one task)
+  bench/            Evaluation harness — see bench/README.md
+internal/
+  agents/           Coordinator, Planner, Coder, Reviewer, + single-call SoloCoder
+  orchestrator/     Workflow engine: sequencing, objective gate, single-call runner
+  runner/           Builds/tests artifacts + runs held-out tests (secrets scrubbed)
+  swebench/         SWE-bench-compatible eval core — see internal/swebench/README.md
+  llm/              Provider interface + adapters (mock, anthropic, openai, ollama)
+  fsafe/            Path-containment helpers for untrusted file paths
+  models/  state/  prompts/  config/
+bench/
+  tasks/            One YAML per task (spec + optional hidden_test)
+  results/          CSV + JSON + Markdown + run.json (regenerated each run)
+.github/workflows/  CI (build/vet/race/gofmt/mock-bench) + SWE-bench gold validation
+```
 
-No configuration required.  Use this for development and CI.
+---
+
+## Running the tests
 
 ```bash
-make run
-# or
-LLM_PROVIDER=mock go run ./cmd/mugi "Build a Go CLI tool"
+make test         # all tests, mock provider, no API key
+make test-race    # with the race detector (as CI does)
+make bench-mock   # the harness's own golden baseline
 ```
-
-### Anthropic
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-export LLM_PROVIDER=anthropic
-export LLM_MODEL=claude-sonnet-4-6   # optional, this is the default
-
-go run ./cmd/mugi "Build a Go REST API"
-```
-
-Available models: `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`
-
-### OpenAI
-
-```bash
-export OPENAI_API_KEY=sk-...
-export LLM_PROVIDER=openai
-export LLM_MODEL=gpt-4o              # optional, this is the default
-
-go run ./cmd/mugi "Build a Go REST API"
-```
-
-### OpenAI-compatible (Groq, Together, Mistral, …)
-
-```bash
-export LLM_PROVIDER=openai
-export OPENAI_API_KEY=gsk_...
-export OPENAI_BASE_URL=https://api.groq.com/openai/v1
-export LLM_MODEL=llama-3.3-70b-versatile
-
-go run ./cmd/mugi "Build a Go REST API"
-```
-
-### Ollama (local open-source models)
-
-```bash
-# 1. Install Ollama: https://ollama.com
-# 2. Pull a model
-ollama pull llama3
-
-# 3. Run MuGi against it
-export LLM_PROVIDER=ollama
-export LLM_MODEL=llama3              # optional, this is the default
-
-go run ./cmd/mugi "Build a Go REST API"
-```
-
----
-
-## Customising prompts
-
-The `prompts/` directory at the project root contains editable template files.
-Edit any `.tmpl` file to change how an agent behaves.  Changes take effect on
-the next run — no recompile needed.
-
-```
-prompts/
-  coordinator.tmpl   ← narrates workflow progress
-  planner.tmpl       ← produces the execution plan
-  coder.tmpl         ← implements the plan
-  reviewer.tmpl      ← evaluates the artifact
-  solo.tmpl          ← single-call baseline (one shot, no plan/review)
-```
-
-MuGi checks `PROMPTS_DIR` (default `prompts/`) first.  If a file is not found
-there it falls back to the compiled-in defaults in `internal/prompts/templates/`.
-
----
-
-## Running tests
-
-```bash
-make test            # all tests
-make test-verbose    # with -v output
-make test-coverage   # HTML coverage report at coverage.html
-```
-
-All tests use the mock provider — no API key required.
-
----
-
-## Project structure
-
-```
-.
-├── cmd/
-│   ├── mugi/               CLI entrypoint
-│   └── bench/              Evaluation harness (see bench/README.md)
-├── bench/
-│   ├── tasks/              YAML task definitions (one per benchmark task)
-│   ├── results/            CSV + Markdown + JSON output (regenerated each run)
-│   └── README.md           How to run the bench, add tasks, add providers
-├── internal/
-│   ├── agents/             Agent interface + four implementations
-│   │   ├── agent.go        Agent interface & JSON extraction helper
-│   │   ├── coordinator.go
-│   │   ├── planner.go
-│   │   ├── coder.go
-│   │   └── reviewer.go
-│   ├── config/             Environment-based configuration
-│   ├── llm/                Provider interface & adapters
-│   │   ├── provider.go     Provider interface (the plug-and-play contract)
-│   │   ├── mock.go         Deterministic mock for tests and local dev
-│   │   ├── anthropic.go    Anthropic Messages API adapter
-│   │   ├── openai.go       OpenAI-compatible adapter (also Ollama, Groq, …)
-│   │   └── registry.go     NewFromEnv() factory
-│   ├── models/             Shared data types (Task, Plan, Artifact, Review, …)
-│   ├── orchestrator/       Workflow engine (sequencing, routing, retry, stop)
-│   ├── prompts/            Template loader (filesystem override + embedded fallback)
-│   │   └── templates/      Embedded default prompt templates
-│   └── state/              Thread-safe shared workflow state
-├── prompts/                User-editable prompt templates (override embedded)
-├── tests/
-│   ├── unit/               Unit tests for each layer
-│   └── integration/        End-to-end pipeline tests (mock provider)
-├── .env.example            Environment variable reference
-├── Makefile                Build, run, test targets
-└── README.md               This file
-```
-
----
-
-## Adding a new agent
-
-1. Create `internal/agents/myagent.go`:
-
-```go
-package agents
-
-import (
-    "context"
-    "fmt"
-
-    "mugi/internal/llm"
-    "mugi/internal/prompts"
-    "mugi/internal/state"
-)
-
-type MyAgent struct {
-    provider llm.Provider
-    loader   *prompts.Loader
-}
-
-func NewMyAgent(provider llm.Provider, loader *prompts.Loader) *MyAgent {
-    return &MyAgent{provider: provider, loader: loader}
-}
-
-func (a *MyAgent) Role() string { return "my-agent" }
-
-func (a *MyAgent) Process(ctx context.Context, st *state.WorkflowState) error {
-    sysPrompt, _ := a.loader.Render("my-agent", st.Task)
-    resp, err := a.provider.Generate(ctx, llm.Request{
-        SystemPrompt: sysPrompt,
-        Messages:     []llm.Message{{Role: "user", Content: "go"}},
-        MaxTokens:    2048,
-    })
-    if err != nil {
-        return fmt.Errorf("my-agent: %w", err)
-    }
-    st.AddLog("my-agent", resp.Content)
-    return nil
-}
-```
-
-2. Add `prompts/my-agent.tmpl` with the system prompt.
-3. Wire the agent into `orchestrator.New(...)` in `cmd/mugi/main.go`.
-
----
-
-## Adding a new LLM provider
-
-Implement the `llm.Provider` interface:
-
-```go
-type MyProvider struct{}
-
-func (p *MyProvider) Name() string { return "myprovider/model" }
-
-func (p *MyProvider) Generate(ctx context.Context, req llm.Request) (llm.Response, error) {
-    // call your API here
-    return llm.Response{Content: "..."}, nil
-}
-```
-
-Add a case to `llm.NewFromEnv()` in `internal/llm/registry.go`.
-
----
 
 ## License
 

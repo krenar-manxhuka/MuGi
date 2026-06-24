@@ -1,0 +1,38 @@
+{
+  "generated_at": "2026-06-24T18:15:19Z",
+  "git_sha": "d29d2c678bddb84415975fdca782bb7146eb99ac",
+  "git_dirty": true,
+  "go_version": "go1.26.1",
+  "os": "windows",
+  "arch": "amd64",
+  "max_revisions": 3,
+  "strategies": [
+    "pipeline",
+    "single"
+  ],
+  "tasks_glob": "bench/tasks/*.yaml",
+  "task_ids": [
+    "easy-01-fizzbuzz",
+    "easy-02-string-reverse",
+    "easy-03-fibonacci",
+    "easy-04-http-health",
+    "hard-01-pubsub",
+    "hard-02-worker-pool",
+    "hard-03-expr-eval",
+    "medium-01-rate-limiter",
+    "medium-02-lru-cache",
+    "medium-03-json-config",
+    "medium-04-csv-to-json",
+    "medium-05-url-shortener"
+  ],
+  "providers": [
+    "haiku",
+    "sonnet"
+  ],
+  "provider_model_names": {
+    "haiku": "anthropic/claude-haiku-4-5-20251001",
+    "sonnet": "anthropic/claude-sonnet-4-6"
+  },
+  "total_runs": 48,
+  "elapsed_seconds": 3219
+}
