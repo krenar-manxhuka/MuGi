@@ -192,6 +192,24 @@ func TestRun_checkoutFailureRecordedNotFatal(t *testing.T) {
 	}
 }
 
+func TestRetrieveFrom_returnsRankedChunks(t *testing.T) {
+	dir := writeFixtureRepo(t)
+	b, err := ModeBuilder("lexical", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits, err := RetrieveFrom(context.Background(), dir, divideQuery, Config{}, b, 3)
+	if err != nil {
+		t.Fatalf("RetrieveFrom: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("expected at least one chunk")
+	}
+	if hits[0].Path != "calc.py" {
+		t.Errorf("top chunk = %s, want calc.py", hits[0].Path)
+	}
+}
+
 func TestModeBuilder_validation(t *testing.T) {
 	if _, err := ModeBuilder("lexical", nil); err != nil {
 		t.Errorf("lexical needs no embedder: %v", err)

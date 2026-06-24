@@ -138,14 +138,9 @@ func EvaluateTask(ctx context.Context, dir string, t Task, cfg Config, modes []M
 	maxK := ks[len(ks)-1]
 
 	changed := index.ChangedFiles(t.GoldPatch)
-	chunks, err := index.WindowChunker{
-		WindowLines:  cfg.Window,
-		OverlapLines: cfg.Overlap,
-		MaxFileBytes: cfg.MaxFileBytes,
-		MaxChunks:    cfg.MaxChunks,
-	}.Chunk(dir)
+	chunks, err := chunkRepo(dir, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("chunk %s: %w", dir, err)
+		return nil, err
 	}
 	query := capRunes(t.ProblemStatement, cfg.MaxQueryRunes)
 
@@ -180,6 +175,43 @@ func EvaluateTask(ctx context.Context, dir string, t Task, cfg Config, modes []M
 		}
 	}
 	return out, nil
+}
+
+// chunkRepo turns a checked-out repo into chunks under the config's caps. It is
+// the one place chunking parameters are applied, shared by the recall flow and
+// the retrieval helper.
+func chunkRepo(dir string, cfg Config) ([]index.Chunk, error) {
+	chunks, err := index.WindowChunker{
+		WindowLines:  cfg.Window,
+		OverlapLines: cfg.Overlap,
+		MaxFileBytes: cfg.MaxFileBytes,
+		MaxChunks:    cfg.MaxChunks,
+	}.Chunk(dir)
+	if err != nil {
+		return nil, fmt.Errorf("chunk %s: %w", dir, err)
+	}
+	return chunks, nil
+}
+
+// RetrieveFrom chunks an already-checked-out repo, builds an index with build,
+// and returns the top-k chunks for query. It is the retrieval half of the recall
+// flow exposed for callers — like prediction — that need the chunks themselves
+// rather than a recall score. dir is only read.
+func RetrieveFrom(ctx context.Context, dir, query string, cfg Config, build IndexBuilder, k int) ([]index.Chunk, error) {
+	cfg = cfg.withDefaults()
+	chunks, err := chunkRepo(dir, cfg)
+	if err != nil {
+		return nil, err
+	}
+	ix, err := build(ctx, chunks)
+	if err != nil {
+		return nil, fmt.Errorf("build index: %w", err)
+	}
+	hits, err := ix.Retrieve(ctx, capRunes(query, cfg.MaxQueryRunes), k)
+	if err != nil {
+		return nil, fmt.Errorf("retrieve: %w", err)
+	}
+	return hits, nil
 }
 
 // Run evaluates every task over the given source: for each it checks out the

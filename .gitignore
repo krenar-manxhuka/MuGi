@@ -426,6 +426,12 @@ recall.json
 *.recall.json
 slice.jsonl
 
+# predictions written by cmd/swebench-predict (model output; can spend to produce)
+predictions.jsonl
+*.predictions.jsonl
+/swebench-predict
+/swebench-predict.exe
+
 # Artifact output directory
 output/
 
