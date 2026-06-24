@@ -1,5 +1,8 @@
 # MuGi — an execution-grounded benchmark for code-generation agents
 
+[![CI](https://github.com/krenar-manxhuka/MuGi/actions/workflows/ci.yml/badge.svg)](https://github.com/krenar-manxhuka/MuGi/actions/workflows/ci.yml)
+[![SWE-bench gold validation](https://github.com/krenar-manxhuka/MuGi/actions/workflows/swebench.yml/badge.svg)](https://github.com/krenar-manxhuka/MuGi/actions/workflows/swebench.yml)
+
 MuGi runs code-generation agents against well-specified programming tasks,
 **compiles and tests every artifact they produce**, scores it against
 **held-out tests the agent never sees**, and reports resolution rate, cost, and
@@ -137,7 +140,9 @@ score the `FAIL_TO_PASS` / `PASS_TO_PASS` contract.
   harness scores them.
 - [`.github/workflows/swebench.yml`](.github/workflows/swebench.yml) runs the
   official harness on the **gold patches** for a small Lite slice on GitHub Actions
-  — a $0, no-model-calls validation that the whole rig works end to end.
+  — a $0, no-model-calls validation that the whole rig works end to end. **It
+  passes** — the gold patch resolves on a clean runner, so the integration is
+  proven, not just claimed.
 
 See [`internal/swebench/README.md`](internal/swebench/README.md) for the design.
 
