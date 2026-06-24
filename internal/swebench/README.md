@@ -70,5 +70,10 @@ correctness into a CI gate.
   offline-validated.
 - ✅ `workflow_dispatch` Actions job: official harness, gold-patch validation on a
   configurable SWE-bench Lite slice ($0).
-- ⬜ Agent diff-output contract (MuGi produces a unified diff for an instance) +
-  feeding those predictions to the harness (the step that costs API tokens).
+- ✅ Retrieval recall@k harness ([`internal/retrievaleval`](../retrievaleval),
+  `cmd/swebench-recall`): tune retrieval against gold patches for $0.
+- ✅ Agent diff-output contract ([`internal/predict`](../predict),
+  `cmd/swebench-predict`): MuGi produces a unified-diff prediction per instance,
+  offline-tested through the mock provider. Pointing it at a real model and
+  feeding `predictions.jsonl` to the official harness is the step that costs API
+  tokens.
