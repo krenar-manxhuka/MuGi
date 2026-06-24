@@ -1,0 +1,112 @@
+name: SWE-bench retrieval recall (recall@k)
+
+# Manual, on-demand. This measures how well retrieval localizes a fix — for each
+# selected SWE-bench Lite instance it clones the repo at its base commit, indexes
+# it, retrieves against the problem statement, and scores recall@k against the
+# gold patch's changed files. It runs no model and pulls no Docker images, so it
+# costs nothing in tokens: the point is to tune retrieval for free before any
+# generation spend. Cloning public repos is read-only — the indexer never executes
+# repository code — and it happens on an ephemeral runner, not a dev machine.
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Limit to one SWE-bench Lite repo (e.g. psf/requests). Empty = any."
+        required: false
+        default: ""
+      count:
+        description: "How many instances to evaluate."
+        required: false
+        default: "5"
+      modes:
+        description: "Retrieval modes (comma-separated): lexical,semantic,hybrid. lexical is $0 and needs no embedder."
+        required: false
+        default: "lexical"
+      k:
+        description: "k values to score recall at (comma-separated)."
+        required: false
+        default: "5,10,20"
+
+permissions:
+  contents: read
+
+jobs:
+  recall:
+    name: recall@k on a SWE-bench Lite slice
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dataset tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install datasets
+
+      # Export the chosen instances straight from the live dataset so the fields
+      # (repo, base_commit, problem_statement, patch) are always authoritative.
+      - name: Select a SWE-bench Lite slice
+        env:
+          REPO: ${{ inputs.repo }}
+          COUNT: ${{ inputs.count }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from datasets import load_dataset
+
+          ds = load_dataset("princeton-nlp/SWE-bench_Lite", split="test")
+          repo = os.environ.get("REPO", "").strip()
+          count = max(1, int(os.environ.get("COUNT", "5")))
+
+          rows, fields = [], (
+              "instance_id", "repo", "base_commit", "problem_statement",
+              "patch", "test_patch", "FAIL_TO_PASS", "PASS_TO_PASS",
+          )
+          for r in ds:
+              if repo and r["repo"] != repo:
+                  continue
+              rows.append({k: r[k] for k in fields})
+              if len(rows) >= count:
+                  break
+          if not rows:
+              raise SystemExit(f"no instances matched repo={repo!r}")
+
+          with open("slice.jsonl", "w") as f:
+              for row in rows:
+                  f.write(json.dumps(row) + "\n")
+          print(f"selected {len(rows)} instance(s):", [r['instance_id'] for r in rows])
+          PY
+
+      - name: Measure recall@k (no model spend)
+        run: |
+          go run ./cmd/swebench-recall \
+            -instances slice.jsonl \
+            -modes "${{ inputs.modes }}" \
+            -k "${{ inputs.k }}" \
+            -out recall.json
+
+      - name: Summary
+        if: always()
+        run: |
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          jq '{embedder, instances, aggregates}' recall.json >> "$GITHUB_STEP_SUMMARY" 2>/dev/null \
+            || cat recall.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload recall report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swebench-recall-report
+          path: recall.json
+          if-no-files-found: warn

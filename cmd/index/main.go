@@ -17,8 +17,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
+	"mugi/internal/embedenv"
 	"mugi/internal/index"
 )
 
@@ -73,51 +73,18 @@ func buildIndex(ctx context.Context, mode string, chunks []index.Chunk) (index.I
 	case "lexical":
 		return index.NewLexicalIndex(chunks), noop, nil
 	case "semantic", "hybrid":
-		emb, cache, cachePath := embedderFromEnv()
+		emb := embedenv.FromEnv(os.Stderr)
 		sem, err := index.NewSemanticIndex(ctx, chunks, emb)
 		if err != nil {
 			return nil, noop, fmt.Errorf("%s index: %w\n(configure EMBED_BASE_URL/EMBED_API_KEY/EMBED_MODEL, or use -mode lexical)", mode, err)
 		}
-		save := func() {
-			if err := cache.SaveTo(cachePath); err != nil {
-				fmt.Fprintf(os.Stderr, "index: warning: save cache: %v\n", err)
-			}
-		}
 		if mode == "semantic" {
-			return sem, save, nil
+			return sem, emb.Save, nil
 		}
-		return index.NewHybridIndex(50, index.NewLexicalIndex(chunks), sem), save, nil
+		return index.NewHybridIndex(50, index.NewLexicalIndex(chunks), sem), emb.Save, nil
 	default:
 		return nil, noop, fmt.Errorf("unknown -mode %q (want lexical|semantic|hybrid)", mode)
 	}
-}
-
-func embedderFromEnv() (index.Embedder, *index.MemoryCache, string) {
-	apiKey := os.Getenv("EMBED_API_KEY")
-	if apiKey == "" {
-		apiKey = os.Getenv("OPENAI_API_KEY")
-	}
-	baseURL := env("EMBED_BASE_URL", "https://api.openai.com/v1")
-	model := env("EMBED_MODEL", "text-embedding-3-small")
-	cachePath := env("EMBED_CACHE", ".embed-cache.json")
-
-	cache, err := index.LoadMemoryCache(cachePath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "index: warning: load cache: %v\n", err)
-		cache = index.NewMemoryCache()
-	}
-	emb := index.CachingEmbedder{
-		Inner: index.NewOpenAIEmbedder(baseURL, apiKey, model, 60*time.Second),
-		Cache: cache,
-	}
-	return emb, cache, cachePath
-}
-
-func env(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
 }
 
 func fail(format string, args ...any) {
