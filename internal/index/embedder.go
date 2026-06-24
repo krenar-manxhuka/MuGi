@@ -45,19 +45,27 @@ func unitVector(text string, dim int) []float32 {
 	v := make([]float32, dim)
 	// Stretch the 32-byte digest to `dim` values by re-hashing with a counter,
 	// so dimensions beyond 32 are still deterministic and well-distributed.
-	var norm float64
 	for j := 0; j < dim; j++ {
 		h := sha256.Sum256([]byte(text + "#" + string(rune(j))))
-		val := float64(int16(uint16(h[0])<<8|uint16(h[1]))) / 32768.0 // in [-1,1)
-		v[j] = float32(val)
-		norm += val * val
+		v[j] = float32(int16(uint16(h[0])<<8|uint16(h[1]))) / 32768.0 // in [-1,1)
+	}
+	return normalize(v)
+}
+
+// normalize scales v to unit length in place and returns it (a zero vector is
+// returned unchanged). Unit-length embeddings make cosine similarity a dot
+// product and keep the mock and real embedders on the same footing.
+func normalize(v []float32) []float32 {
+	var norm float64
+	for _, x := range v {
+		norm += float64(x) * float64(x)
 	}
 	if norm == 0 {
 		return v
 	}
 	inv := float32(1 / math.Sqrt(norm))
-	for j := range v {
-		v[j] *= inv
+	for i := range v {
+		v[i] *= inv
 	}
 	return v
 }

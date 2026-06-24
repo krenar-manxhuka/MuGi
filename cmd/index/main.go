@@ -1,9 +1,14 @@
-// Command index builds a lexical retrieval index over a local directory and
-// prints the top-k chunks for a query. It is fully offline ($0, no API key, no
-// network) — a demonstration of the retrieval core (M1). Point it at any repo,
-// including this one:
+// Command index builds a retrieval index over a local directory and prints the
+// top-k chunks for a query.
 //
+//	# lexical (BM25) — fully offline, $0, no key:
 //	go run ./cmd/index -dir . -q "bm25 lexical retrieval" -k 5
+//
+//	# semantic / hybrid — needs an embeddings endpoint. Point EMBED_BASE_URL at a
+//	# local Ollama server for a free, offline embedder, or set EMBED_API_KEY for a
+//	# hosted one. Embeddings are cached (EMBED_CACHE) so reruns don't re-pay.
+//	EMBED_BASE_URL=http://localhost:11434/v1 EMBED_MODEL=nomic-embed-text \
+//	  go run ./cmd/index -mode hybrid -q "graceful shutdown" -k 5
 package main
 
 import (
@@ -12,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"mugi/internal/index"
 )
@@ -22,6 +28,7 @@ func main() {
 	k := flag.Int("k", 5, "number of chunks to return")
 	window := flag.Int("window", 50, "chunk size in lines")
 	overlap := flag.Int("overlap", 10, "overlap between chunks in lines")
+	mode := flag.String("mode", "lexical", "retrieval mode: lexical | semantic | hybrid")
 	flag.Parse()
 
 	if strings.TrimSpace(*query) == "" {
@@ -30,26 +37,92 @@ func main() {
 		os.Exit(2)
 	}
 
+	ctx := context.Background()
 	chunks, err := index.WindowChunker{WindowLines: *window, OverlapLines: *overlap}.Chunk(*dir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "index: chunk %s: %v\n", *dir, err)
-		os.Exit(1)
+		fail("chunk %s: %v", *dir, err)
 	}
 
-	ix := index.NewLexicalIndex(chunks)
-	hits, err := ix.Retrieve(context.Background(), *query, *k)
+	ix, cleanup, err := buildIndex(ctx, *mode, chunks)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "index: retrieve: %v\n", err)
-		os.Exit(1)
+		fail("%v", err)
+	}
+	defer cleanup()
+
+	hits, err := ix.Retrieve(ctx, *query, *k)
+	if err != nil {
+		fail("retrieve: %v", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "indexed %d chunks under %q · top %d for %q:\n\n", len(chunks), *dir, len(hits), *query)
+	fmt.Fprintf(os.Stderr, "indexed %d chunks under %q · mode=%s · top %d for %q:\n\n",
+		len(chunks), *dir, *mode, len(hits), *query)
 	for i, c := range hits {
 		fmt.Printf("%2d. %s:%d-%d\n    %s\n", i+1, c.Path, c.Start, c.End, firstLine(c.Content))
 	}
 	if len(hits) == 0 {
 		fmt.Println("(no matching chunks)")
 	}
+}
+
+// buildIndex constructs the requested index. lexical is fully offline; semantic
+// and hybrid embed the chunks via an endpoint configured from the environment.
+// cleanup persists the embedding cache.
+func buildIndex(ctx context.Context, mode string, chunks []index.Chunk) (index.Index, func(), error) {
+	noop := func() {}
+	switch mode {
+	case "lexical":
+		return index.NewLexicalIndex(chunks), noop, nil
+	case "semantic", "hybrid":
+		emb, cache, cachePath := embedderFromEnv()
+		sem, err := index.NewSemanticIndex(ctx, chunks, emb)
+		if err != nil {
+			return nil, noop, fmt.Errorf("%s index: %w\n(configure EMBED_BASE_URL/EMBED_API_KEY/EMBED_MODEL, or use -mode lexical)", mode, err)
+		}
+		save := func() {
+			if err := cache.SaveTo(cachePath); err != nil {
+				fmt.Fprintf(os.Stderr, "index: warning: save cache: %v\n", err)
+			}
+		}
+		if mode == "semantic" {
+			return sem, save, nil
+		}
+		return index.NewHybridIndex(50, index.NewLexicalIndex(chunks), sem), save, nil
+	default:
+		return nil, noop, fmt.Errorf("unknown -mode %q (want lexical|semantic|hybrid)", mode)
+	}
+}
+
+func embedderFromEnv() (index.Embedder, *index.MemoryCache, string) {
+	apiKey := os.Getenv("EMBED_API_KEY")
+	if apiKey == "" {
+		apiKey = os.Getenv("OPENAI_API_KEY")
+	}
+	baseURL := env("EMBED_BASE_URL", "https://api.openai.com/v1")
+	model := env("EMBED_MODEL", "text-embedding-3-small")
+	cachePath := env("EMBED_CACHE", ".embed-cache.json")
+
+	cache, err := index.LoadMemoryCache(cachePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "index: warning: load cache: %v\n", err)
+		cache = index.NewMemoryCache()
+	}
+	emb := index.CachingEmbedder{
+		Inner: index.NewOpenAIEmbedder(baseURL, apiKey, model, 60*time.Second),
+		Cache: cache,
+	}
+	return emb, cache, cachePath
+}
+
+func env(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func fail(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "index: "+format+"\n", args...)
+	os.Exit(1)
 }
 
 // firstLine returns the first non-blank line of a chunk, trimmed, for a preview.

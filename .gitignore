@@ -410,6 +410,12 @@ FodyWeavers.xsd
 /mugi
 /mugi.exe
 /bench.exe
+/index
+/index.exe
+
+# Embedding cache written by cmd/index (content-addressed; safe to delete)
+.embed-cache.json
+*.embed-cache.json
 coverage.out
 coverage.html
 

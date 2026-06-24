@@ -63,6 +63,52 @@ func TestWindowChunker_ChunksAndSkips(t *testing.T) {
 	}
 }
 
+func TestWindowChunker_SkipsSymlinks(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "real.txt")
+	if err := os.WriteFile(real, []byte("hello\nworld\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(root, "link.txt")); err != nil {
+		t.Skip("symlinks unavailable on this host: " + err.Error())
+	}
+
+	chunks, err := (WindowChunker{}).Chunk(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawReal bool
+	for _, c := range chunks {
+		if c.Path == "link.txt" {
+			t.Fatal("symlink must not be indexed (traversal-escape guard)")
+		}
+		if c.Path == "real.txt" {
+			sawReal = true
+		}
+	}
+	if !sawReal {
+		t.Fatal("the real file should still be indexed")
+	}
+}
+
+func TestWindowChunker_ChunkCap(t *testing.T) {
+	root := t.TempDir()
+	var sb strings.Builder
+	for i := 0; i < 500; i++ {
+		sb.WriteString("x\n")
+	}
+	if err := os.WriteFile(filepath.Join(root, "big.go"), []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	chunks, err := WindowChunker{WindowLines: 5, OverlapLines: 0, MaxChunks: 3, MaxFileBytes: 1 << 20}.Chunk(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 3 {
+		t.Fatalf("expected chunk cap to stop at 3, got %d", len(chunks))
+	}
+}
+
 func TestIsBinary(t *testing.T) {
 	if !isBinary([]byte("abc\x00def")) {
 		t.Error("NUL byte should be detected as binary")

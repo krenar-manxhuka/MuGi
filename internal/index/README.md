@@ -5,27 +5,35 @@ relevant to a task, instead of a whole repo that won't fit in a context window.
 This is the prerequisite for MuGi generating real SWE-bench patches. Full design:
 [`docs/retrieval-design.md`](../../docs/retrieval-design.md).
 
-## What's here (M1 — done, $0, fully offline)
+## What's here
 
-| Piece | File |
-|---|---|
-| Language-agnostic line-window chunker (skips binaries, symlinks, oversized files, dependency dirs; chunk-capped) | `chunk.go` |
-| BM25 lexical retrieval with an **identifier-aware tokenizer** (`FizzBuzz` → `fizz`,`buzz`; `parse_error` → `parse`,`error`) | `lexical.go` |
-| `Embedder` seam + deterministic `MockEmbedder` (offline-testable; real embeddings + hybrid are M2) | `embedder.go` |
-| `recall@k` against a gold patch — measure retrieval **for free**, no model generation | `recall.go` |
+| Piece | File | Notes |
+|---|---|---|
+| Language-agnostic line-window chunker (skips binaries, symlinks, oversized files, dependency dirs; chunk-capped) | `chunk.go` | read-only; never executes the repo |
+| **Lexical** BM25 retrieval with an identifier-aware tokenizer (`FizzBuzz`→`fizz`,`buzz`) | `lexical.go` | strong free baseline |
+| **Semantic** retrieval by embedding cosine similarity | `semantic.go` | M2 |
+| **Hybrid** lexical⊕semantic via Reciprocal Rank Fusion | `hybrid.go` | M2 — robust, no score calibration |
+| `Embedder` seam + deterministic `MockEmbedder` + real OpenAI-compatible `OpenAIEmbedder` | `embedder.go`, `openai_embedder.go` | works with OpenAI, Voyage, or local **Ollama** (free) |
+| Content-addressed embedding **cache** (in-memory + JSON file) so reruns don't re-pay | `cache.go` | M2 |
+| `recall@k` against a gold patch — measure retrieval **for free**, no model generation | `recall.go` | the tuning signal |
 
-Everything is unit-tested offline with no network. Try it on any repo:
+Everything is unit-tested offline with **no network and no spend** — the real
+embedder is tested against an `httptest` server, the rest with the mock embedder.
+
+## Try it
 
 ```bash
+# lexical — offline, $0:
 go run ./cmd/index -dir . -q "bm25 lexical retrieval" -k 5
+
+# hybrid — point at a local Ollama embedder for $0, or a hosted one with a key:
+EMBED_BASE_URL=http://localhost:11434/v1 EMBED_MODEL=nomic-embed-text \
+  go run ./cmd/index -mode hybrid -q "graceful shutdown" -k 5
 ```
 
-## Next (M2 / M3)
+## Next (M3)
 
-- **M2:** a real `Embedder` (embeddings API) behind the interface + hybrid
-  (lexical ⊕ semantic) retrieval + embedding cache.
-- **M3:** wire retrieval into the agent → `predictions.jsonl` → the official
-  SWE-bench harness, with the `{no-context, hybrid, oracle}` ablation.
-
-The key discipline: tune retrieval with **`recall@k` against gold patches ($0)**
-before spending anything on generation.
+Wire retrieval into the agent → `predictions.jsonl` → the official SWE-bench
+harness, with the `{no-context, hybrid, oracle}` ablation. The discipline holds:
+tune retrieval with **`recall@k` against gold patches** (free, or cents of local
+embeddings) before spending anything on generation.
