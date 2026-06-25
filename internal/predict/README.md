@@ -47,3 +47,20 @@ LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=... \
 
 The resulting `predictions.jsonl` is what the official harness scores (swap it in
 for `--predictions_path gold`). It clones public repos — run it on CI/sandbox.
+
+## The ablation: is it retrieval or the model?
+
+`-context` controls what code the model sees, so resolution can be reported under
+three conditions that separate the two failure modes:
+
+| `-context` | What the model sees | Reads |
+|---|---|---|
+| `none` | nothing (the report alone) | lower bound — no checkout, no network |
+| `retrieval` | top-k retrieved chunks | the real system |
+| `oracle` | exactly the gold patch's changed files | upper bound — isolates generation |
+
+If `retrieval ≈ oracle`, retrieval is solved and the gap to `oracle` is the model's
+headroom; if `oracle` resolves but `retrieval` doesn't, the fix is better retrieval.
+The `.github/workflows/swebench-predict.yml` workflow takes a `context` input, so
+the full ablation is three dispatches. `oracle` only uses the gold patch to *pick
+the files*; the model is never shown the diff.
