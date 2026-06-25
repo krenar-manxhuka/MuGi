@@ -245,6 +245,26 @@ func TestOracleChunks_onlyTheNamedFiles(t *testing.T) {
 	}
 }
 
+func TestTopFileChunks_feedsWholeTopFile(t *testing.T) {
+	dir := writeFixtureRepo(t)
+	b, err := ModeBuilder("lexical", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := TopFileChunks(context.Background(), dir, divideQuery, Config{}, b, 1, 20)
+	if err != nil {
+		t.Fatalf("TopFileChunks: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("expected chunks from the top file")
+	}
+	for _, c := range got {
+		if c.Path != "calc.py" {
+			t.Errorf("topFiles=1 should return only calc.py, got %s", c.Path)
+		}
+	}
+}
+
 func TestModeBuilder_validation(t *testing.T) {
 	if _, err := ModeBuilder("lexical", nil); err != nil {
 		t.Errorf("lexical needs no embedder: %v", err)

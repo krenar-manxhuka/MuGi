@@ -243,6 +243,62 @@ func OracleChunks(dir string, files []string, cfg Config, k int) ([]index.Chunk,
 	return out, nil
 }
 
+// TopFileChunks ranks files by retrieval against the query, then returns *all*
+// chunks of the top topFiles files (capped to k), in file order. It sits between
+// plain chunk retrieval and the oracle: retrieval picks the file(s) from the
+// problem statement (no gold patch), but the model is then shown each file whole
+// and coherent instead of scattered top-k fragments — which the ablation found is
+// what the generator actually needs to localize and match context. dir is only
+// read.
+func TopFileChunks(ctx context.Context, dir, query string, cfg Config, build IndexBuilder, topFiles, k int) ([]index.Chunk, error) {
+	cfg = cfg.withDefaults()
+	chunks, err := chunkRepo(dir, cfg)
+	if err != nil {
+		return nil, err
+	}
+	ix, err := build(ctx, chunks)
+	if err != nil {
+		return nil, fmt.Errorf("build index: %w", err)
+	}
+	pool := k * 5
+	if pool < 50 {
+		pool = 50
+	}
+	hits, err := ix.Retrieve(ctx, capRunes(query, cfg.MaxQueryRunes), pool)
+	if err != nil {
+		return nil, fmt.Errorf("retrieve: %w", err)
+	}
+
+	// Rank files by where they first appear in the ranked hits.
+	if topFiles <= 0 {
+		topFiles = 1
+	}
+	seen := make(map[string]bool, len(hits))
+	want := make(map[string]bool, topFiles)
+	for _, h := range hits {
+		if seen[h.Path] {
+			continue
+		}
+		seen[h.Path] = true
+		want[h.Path] = true
+		if len(want) >= topFiles {
+			break
+		}
+	}
+
+	out := make([]index.Chunk, 0, k)
+	for _, c := range chunks {
+		if !want[c.Path] {
+			continue
+		}
+		out = append(out, c)
+		if k > 0 && len(out) >= k {
+			break
+		}
+	}
+	return out, nil
+}
+
 // Run evaluates every task over the given source: for each it checks out the
 // repo, runs EvaluateTask, and releases the checkout. A checkout or eval failure
 // is recorded per (mode, k) row rather than aborting the run, so one bad repo
