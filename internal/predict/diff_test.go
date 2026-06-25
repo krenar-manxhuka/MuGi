@@ -102,6 +102,18 @@ func TestExtractDiff_blankContextLineGetsLeadingSpace(t *testing.T) {
 	}
 }
 
+func TestExtractDiff_recountsWrongHunkHeader(t *testing.T) {
+	// Header claims 1 old / 1 new, but the body is 3 old / 3 new. The wrong count
+	// is what makes patch reject the hunk; recount must correct it.
+	got, err := ExtractDiff("--- a/x.py\n+++ b/x.py\n@@ -5,1 +5,1 @@ def f():\n a\n-b\n-c\n+d\n+e")
+	if err != nil {
+		t.Fatalf("ExtractDiff: %v", err)
+	}
+	if !strings.Contains(got, "@@ -5,3 +5,3 @@ def f():") {
+		t.Errorf("hunk header not recounted (want -5,3 +5,3):\n%s", got)
+	}
+}
+
 func TestExtractDiff_keepsMultiFilePatch(t *testing.T) {
 	// A legitimate two-file patch (consecutive headers, no prose) must survive.
 	two := "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n" +

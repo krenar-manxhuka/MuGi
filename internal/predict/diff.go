@@ -2,6 +2,7 @@ package predict
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -21,15 +22,31 @@ func ExtractDiff(raw string) (string, error) {
 	}
 	s = sliceFromDiffStart(s)
 	s = scanDiff(s)
-	s = strings.TrimRight(s, " \t\n")
+	// Drop trailing blank lines *before* recounting — a spurious trailing context
+	// line would otherwise inflate the hunk counts and then be trimmed away,
+	// leaving the header disagreeing with the body again.
+	s = dropTrailingBlankLines(s)
 	if strings.TrimSpace(s) == "" {
 		return "", fmt.Errorf("no diff found in model output")
 	}
+	s = recountHunks(s)
 	if err := ValidateDiff(s); err != nil {
 		return "", err
 	}
 	// git apply is happiest with a trailing newline.
 	return s + "\n", nil
+}
+
+// dropTrailingBlankLines removes whitespace-only lines from the end of the diff
+// (e.g. a context blank line normalized to a single space). It leaves added or
+// removed lines alone, since those carry a '+'/'-' prefix and aren't blank.
+func dropTrailingBlankLines(s string) string {
+	lines := strings.Split(s, "\n")
+	end := len(lines)
+	for end > 0 && strings.TrimSpace(lines[end-1]) == "" {
+		end--
+	}
+	return strings.Join(lines[:end], "\n")
 }
 
 // scanDiff keeps only the leading well-formed unified diff, stopping at the first
@@ -64,6 +81,53 @@ func scanDiff(s string) string {
 		}
 	}
 	return strings.Join(out, "\n")
+}
+
+// hunkHeaderRe matches a unified-diff hunk header, capturing the old start, new
+// start, and the trailing section text (` @@ def foo():`). The line counts are
+// deliberately not captured — recountHunks recomputes them.
+var hunkHeaderRe = regexp.MustCompile(`^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$`)
+
+// recountHunks rewrites each `@@` header so its line counts match the actual hunk
+// body. Models frequently miscount — e.g. "@@ -237,10 +237,14 @@" for a hunk that
+// really spans 12 old / 15 new lines — and `patch`/`git apply` then reject the
+// hunk as malformed once the declared count runs out mid-body. The start line
+// numbers are left as given (the patcher locates by context); only the counts are
+// made truthful. Input must already be a clean diff (post scanDiff), so every
+// body line begins with ' ', '+', '-', or '\'.
+func recountHunks(diff string) string {
+	lines := strings.Split(diff, "\n")
+	i := 0
+	for i < len(lines) {
+		m := hunkHeaderRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			i++
+			continue
+		}
+		oldCount, newCount := 0, 0
+		j := i + 1
+		for j < len(lines) {
+			ln := lines[j]
+			if strings.HasPrefix(ln, "@@") || isDiffHeaderLine(ln) {
+				break
+			}
+			switch {
+			case ln == "", strings.HasPrefix(ln, " "):
+				oldCount++
+				newCount++
+			case strings.HasPrefix(ln, "-"):
+				oldCount++
+			case strings.HasPrefix(ln, "+"):
+				newCount++
+			case strings.HasPrefix(ln, "\\"):
+				// "\ No newline at end of file" — counts on neither side.
+			}
+			j++
+		}
+		lines[i] = fmt.Sprintf("@@ -%s,%d +%s,%d @@%s", m[1], oldCount, m[2], newCount, m[3])
+		i = j
+	}
+	return strings.Join(lines, "\n")
 }
 
 // diffHeaderPrefixes are the line starts of a git/unified diff's file-header
