@@ -3,8 +3,7 @@
 This package evaluates a candidate patch against a real [SWE-bench](https://www.swebench.com/)
 instance: apply the patch, apply the held-out `test_patch`, run the tests, and
 score the `FAIL_TO_PASS` / `PASS_TO_PASS` contract. It exists so MuGi can be
-measured on a recognized, repository-level benchmark — not just the greenfield
-Go tasks in `bench/`.
+measured on a recognized, repository-level benchmark.
 
 ## Design: a pure core behind an execution seam
 

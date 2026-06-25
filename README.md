@@ -1,254 +1,94 @@
-# MuGi — an execution-grounded benchmark for code-generation agents
+# MuGi — a retrieval-augmented SWE-bench agent, measured honestly
 
 [![CI](https://github.com/krenar-manxhuka/MuGi/actions/workflows/ci.yml/badge.svg)](https://github.com/krenar-manxhuka/MuGi/actions/workflows/ci.yml)
 [![SWE-bench gold validation](https://github.com/krenar-manxhuka/MuGi/actions/workflows/swebench.yml/badge.svg)](https://github.com/krenar-manxhuka/MuGi/actions/workflows/swebench.yml)
 
-MuGi runs code-generation agents against well-specified programming tasks,
-**compiles and tests every artifact they produce**, scores it against
-**held-out tests the agent never sees**, and reports resolution rate, cost, and
-latency. It ships a multi-agent pipeline (Coordinator → Planner → Coder →
-Reviewer) as the reference agent — but the interesting part isn't the agent, it's
-measuring *honestly* whether that orchestration is worth its cost, and catching
-the ways LLM-driven workflows quietly lie about their own quality.
+MuGi turns a [SWE-bench](https://www.swebench.com/) issue into a fix and checks
+whether it actually works:
 
-It's written in Go, is provider-agnostic (Anthropic, OpenAI-compatible, Ollama,
-or a deterministic mock), and runs the whole pipeline offline with no API key.
+```
+clone repo @ base_commit ─► chunk + index ─► retrieve the relevant code
+   ─► ask a model for one unified diff ─► the official SWE-bench harness scores it
+```
 
----
+Two things make it more than a wrapper: retrieval quality is measured **for free**
+before any model spend (`recall@k` against the gold patch), and resolution is run
+as an **ablation** that separates *finding* the code from *fixing* the bug.
 
-## Headline results
+## The finding
 
-One run, two frontier models, two orchestration strategies, every artifact built
-and tested (`go run ./cmd/bench -providers sonnet,haiku -strategy both`, 2026-06-24):
+On a small `astropy` slice (Claude Haiku 4.5, k=20):
 
-| Provider | Strategy | Build | Test (self) | Hidden | False approvals | Avg latency | Cost | $/solved |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| `claude-haiku-4-5` | pipeline | 12/12 | 11/12 | 5/5 | **5** | 79.0s | $0.64 | $0.058 |
-| `claude-haiku-4-5` | single   | 11/12 |  7/12 | 5/5 | 0 | 27.0s | $0.22 | $0.031 |
-| `claude-sonnet-4-6` | pipeline | 12/12 | 10/12 | 5/5 | **4** | 130.3s | $1.43 | $0.143 |
-| `claude-sonnet-4-6` | single   | 12/12 | **11/12** | 5/5 | 0 | 26.9s | $0.38 | $0.034 |
+| | result |
+|---|---|
+| **recall@20** — is the gold file retrieved? | **5/5** |
+| **retrieval** — resolved end to end | **0/5** |
+| **oracle** — same files fed *whole* | **2/5** |
 
-*Total run cost: $2.66. Full per-task detail and captured failure output:*
-[`bench/results/RESULTS.md`](bench/results/RESULTS.md) · *raw rows:*
-[`bench/results/results.csv`](bench/results/results.csv) · *provenance:*
-[`bench/results/run.json`](bench/results/run.json).
-
----
-
-## What the harness measured
-
-> **Fuller write-up:** [Does multi-agent orchestration beat a single LLM call? I measured it.](docs/does-multi-agent-orchestration-help.md)
-
-### 1. The LLM reviewer rubber-stamps code that fails its own tests
-
-Across the two pipeline runs, the reviewer agent **approved failing artifacts 9
-times** (Haiku 5, Sonnet 4) — scoring them ~9/10 *while `go test` on that same
-artifact was red*, and it had been handed the failing output. Without an
-independent gate, every one of those would have shipped as "approved."
-
-MuGi computes `build`/`test` itself and an **objective gate** overrides the
-reviewer whenever execution is red, so a rubber-stamped artifact still surfaces as
-a failure and the loop keeps revising. The lesson is the headline: **you cannot
-delegate the quality gate to an LLM reviewer, even when you feed it the test
-results.** Eyeballing one "looks-right" program by hand reproduces exactly this
-blind spot — only scoring execution across every artifact exposes it.
-
-### 2. Does the multi-agent pipeline beat a single call? Only for the weak model.
-
-Same model, same tasks — the full 4-agent pipeline vs. one well-prompted Coder
-call (`-strategy both`):
-
-- **Haiku: the pipeline genuinely helped — 11/12 vs 7/12** — but at **~3× the
-  cost.** Orchestration compensates for a less capable model.
-- **Sonnet: the single call won — 11/12 vs 10/12 — at ~¼ the cost** ($0.38 vs
-  $1.43) and ⅕ the latency. (One of the pipeline's two misses was an API error,
-  not the model; even being charitable, the pipeline did no better.) On the
-  Pub/Sub task specifically, the pipeline's revision loop **took a solution a
-  single call got right and broke it**, then approved the broken version 3 times.
-
-**Cost per solved task tells the story: Sonnet-single $0.034, Sonnet-pipeline
-$0.143** — the orchestration is dominated for a capable model. The honest takeaway:
-*multi-agent orchestration buys capability for a weak model and little or nothing
-for a strong one, always at 3–4× the cost.* If your model is good, a single
-well-prompted call is the better engineering choice on tasks this size.
-
-### 3. Held-out tests confirm the wins are real (not self-graded)
-
-`test (self)` runs the model's **own** tests — and a model can pass by writing
-weak tests. So 5 tasks carry a **`hidden_test`**: a harness-authored acceptance
-test the coder never sees, injected into the implementation and run separately.
-Every passing solution on those 5 tasks also passed its hidden test (**5/5 across
-all four configs**), so the self-reported passes there aren't gamed. Extending
-hidden coverage to the hard tasks — where the failures cluster — is the next step.
-
-> The harness keeps **infrastructure failures distinct from model failures**: an
-> `unexpected EOF` from the API after retry/backoff is recorded as an error row,
-> never as a build/test failure, so a dropped connection is never miscounted as
-> "the model can't solve this."
-
----
+Retrieval found the right file every time and still resolved nothing; handing the
+model the same file as one coherent blob instead of scattered chunks lifted it to
+2/5. **Finding the code wasn't the bottleneck — how it was presented was.** Full
+write-up, including the three patch-extraction bugs found along the way:
+[*Recall was perfect. Resolution was zero.*](docs/does-retrieval-resolve-swebench.md)
 
 ## How it works
 
-The reference agent is the multi-agent pipeline — but it's just *one row* in the
-benchmark above, not the point of the project.
+- **Retrieval** (`internal/index`, `internal/retrievaleval`) — a language-agnostic
+  window chunker feeding BM25 lexical, embedding semantic, or hybrid (RRF) retrieval.
+  `recall@k` scores it against the gold patch's files — no model, **$0**.
+- **Generation** (`internal/predict`) — one well-prompted call → a single unified
+  diff, extracted and shape-checked before it becomes a prediction.
+- **Scoring** (`internal/swebench`) — the authoritative `% resolved` comes from the
+  **official SWE-bench harness** (Python/Docker on CI), never a home-grown evaluator.
+- **The ablation** — `swebench-predict -context {none|retrieval|file|oracle}` reports
+  resolution under each context, so the retrieval gap and the model ceiling are
+  separated cleanly. `oracle` only uses the gold patch to *pick the files*; the
+  model never sees the answer.
 
-```
-User prompt
-    │
-    ▼
-┌─────────────┐
-│ Coordinator │  Initialises the workflow, narrates progress, final summary
-└──────┬──────┘
-       ▼
-┌─────────────┐
-│   Planner   │  Turns the task into a dependency-ordered execution plan
-└──────┬──────┘
-       ▼                   ┌──────────┐
-┌─────────────┐  build+   │ Reviewer │  Inspects the artifact + the real
-│    Coder    │  test ──► │          │  go build / go test output
-└─────────────┘  ◄─────── └──────────┘
-   (loop ≤ MAX_REVISIONS, but an OBJECTIVE GATE can override a red "approval")
-```
+Everything is unit-tested offline with a mock provider and mock embedder (no
+network, no spend); the live, untrusted parts (cloning repos, running test suites)
+run on GitHub Actions. Zero external dependencies — pure Go standard library.
 
-- The **orchestrator** is pure Go: it sequences agents, runs `go build`/`go test`
-  on every artifact, enforces the revision cap, and applies the objective gate.
-  Agents never know about each other — they share a lock-guarded `WorkflowState`.
-- The **`-strategy single`** path skips the plan/review/revision entirely: one
-  Coder call, same objective scoring — the control for the ablation above.
-- The **LLM layer** is a single `Provider` interface; every agent calls only
-  `provider.Generate(ctx, req)`. Swapping mock → Anthropic → Ollama is one env var.
-- **Untrusted by default:** generated code is built and tested with credential
-  environment variables stripped, and every model-supplied file path is contained
-  to the run directory.
-
----
-
-## Real repository-level tasks (SWE-bench Lite)
-
-The Go tasks above are greenfield. To measure on *real* repository changes, MuGi
-also integrates [SWE-bench](https://www.swebench.com/) Lite — apply a candidate
-patch plus the held-out `test_patch` to a real repo checkout, run the tests, and
-score the `FAIL_TO_PASS` / `PASS_TO_PASS` contract.
-
-- The **core** (`internal/swebench`) — dataset loader, pytest/go-test log parsers,
-  scoring, and an `Environment` seam — is unit-tested offline against a local git
-  fixture (gold patch resolves, empty doesn't, garbage doesn't apply).
-- The **authoritative `% resolved` comes from the official SWE-bench harness**, not
-  a home-grown evaluator (home-grown harnesses are a known source of
-  non-reproducible numbers). MuGi's job is to produce predictions; the maintainers'
-  harness scores them.
-- [`.github/workflows/swebench.yml`](.github/workflows/swebench.yml) runs the
-  official harness on the **gold patches** for a small Lite slice on GitHub Actions
-  — a $0, no-model-calls validation that the whole rig works end to end. **It
-  passes** — the gold patch resolves on a clean runner, so the integration is
-  proven, not just claimed.
-
-See [`internal/swebench/README.md`](internal/swebench/README.md) for the design.
-
-### Retrieval-augmented agent + ablation
-
-MuGi can also generate its own predictions: retrieve the relevant code, ask a
-model for a unified diff, and score it with the official harness
-([`internal/retrievaleval`](internal/retrievaleval), [`internal/predict`](internal/predict),
-`cmd/swebench-recall`, `cmd/swebench-predict`). On a small astropy slice the
-surprising finding was that **retrieval found the gold file every time (recall@20 =
-5/5) yet the agent resolved 0/5 — while feeding the model the same file *whole*
-resolved 2/5.** Finding the code wasn't the bottleneck; presenting it was.
-
-> **Fuller write-up:** [Recall was perfect. Resolution was zero. A SWE-bench retrieval ablation.](docs/does-retrieval-resolve-swebench.md)
-
----
-
-## Quickstart (no API key required)
+## Try it
 
 ```bash
-go run ./cmd/mugi "Build a simple Go HTTP server with a /health endpoint"
+# $0, no key — see retrieval rank chunks of any local directory:
+go run ./cmd/index -dir . -q "bm25 lexical retrieval" -k 5
+
+# $0, no key — measure recall@k on a SWE-bench slice:
+go run ./cmd/swebench-recall -instances slice.jsonl -modes lexical -k 5,10,20
+
+# spends — generate predictions, then score with the official harness:
+LLM_PROVIDER=anthropic LLM_MODEL=claude-haiku-4-5 ANTHROPIC_API_KEY=... \
+  go run ./cmd/swebench-predict -instances slice.jsonl -context retrieval -k 20
 ```
 
-The default `mock` provider returns deterministic responses so the full pipeline
-runs offline. Run the benchmark yourself:
+`slice.jsonl` is a SWE-bench dataset export. The full predict→score flow runs on CI
+via [`.github/workflows/swebench-predict.yml`](.github/workflows/swebench-predict.yml)
+(a predict job holding the API key, and a separate scoring job that runs the
+official harness in Docker with no key).
 
-```bash
-go run ./cmd/bench -providers mock                 # offline harness self-test
-go run ./cmd/bench -providers haiku -strategy both # needs ANTHROPIC_API_KEY
-```
-
-The benchmark streams each row to `results.csv` as it finishes (crash-safe) and
-writes a `run.json` provenance stamp (git SHA, models, Go version). How to run,
-add tasks, or add providers: [`bench/README.md`](bench/README.md).
-
----
-
-## Metrics
-
-| Column | Meaning |
-|---|---|
-| **build** | `go build ./...` passed on the final artifact |
-| **test (self)** | `go test ./...` passed on the model's *own* tests (and it shipped tests) |
-| **hidden** | passed a held-out, harness-authored acceptance test the coder never saw |
-| **false approvals** | times the reviewer approved an artifact whose build/test was red |
-| **$/solved** | total cost ÷ tasks resolved — the number that actually compares models |
-
-Every number is reproducible from `bench/results/` and stamped in `run.json`; a row
-that can't be run cleanly is marked unrun, never back-filled.
-
----
-
-## Configuration
-
-Copy `.env.example` to `.env` and set what you need:
-
-| Variable | Default | Description |
-|---|---|---|
-| `LLM_PROVIDER` | `mock` | `mock` \| `anthropic` \| `openai` \| `ollama` |
-| `LLM_MODEL` | provider default | Model name override |
-| `MAX_REVISIONS` | `3` | Max coder→reviewer cycles |
-| `MAX_LLM_CALLS` | `50` | Hard ceiling on calls per run (cost guardrail) |
-| `OUTPUT_DIR` | `output` | Where artifact files are written |
-
-```bash
-LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... \
-  go run ./cmd/mugi "Build a REST API in Go"
-```
-
-Providers: **Anthropic** (`claude-sonnet-4-6`, `claude-haiku-4-5-20251001`,
-`claude-opus-4-7`), **OpenAI-compatible** (set `OPENAI_BASE_URL` for Groq /
-Together / Mistral / …), and **Ollama** (local, `OLLAMA_BASE_URL`). Prompt
-templates live in `prompts/*.tmpl` and are editable without recompiling.
-
----
-
-## Project layout
+## Layout
 
 ```
 cmd/
-  mugi/             CLI entrypoint (run the pipeline on one task)
-  bench/            Evaluation harness — see bench/README.md
+  index            retrieval demo over a local directory ($0)
+  swebench-recall  recall@k on a slice ($0)
+  swebench-predict instance → unified diff → predictions.jsonl
 internal/
-  agents/           Coordinator, Planner, Coder, Reviewer, + single-call SoloCoder
-  orchestrator/     Workflow engine: sequencing, objective gate, single-call runner
-  runner/           Builds/tests artifacts + runs held-out tests (secrets scrubbed)
-  swebench/         SWE-bench-compatible eval core — see internal/swebench/README.md
-  llm/              Provider interface + adapters (mock, anthropic, openai, ollama)
-  fsafe/            Path-containment helpers for untrusted file paths
-  models/  state/  prompts/  config/
-bench/
-  tasks/            One YAML per task (spec + optional hidden_test)
-  results/          CSV + JSON + Markdown + run.json (regenerated each run)
-.github/workflows/  CI (build/vet/race/gofmt/mock-bench) + SWE-bench gold validation
+  index            chunker + lexical/semantic/hybrid retrieval + recall@k
+  retrievaleval    checkout seam + recall/ablation context selection
+  predict          single-call diff generation + extraction
+  swebench         dataset loader + official-harness-compatible scoring core
+  llm              provider abstraction (anthropic / openai / ollama / mock)
+  embedenv/prompts supporting seams
+docs/              design + the ablation write-up
 ```
 
----
-
-## Running the tests
-
-```bash
-make test         # all tests, mock provider, no API key
-make test-race    # with the race detector (as CI does)
-make bench-mock   # the harness's own golden baseline
-```
+See each package's `README.md` for design detail, and
+[`internal/swebench/README.md`](internal/swebench/README.md) for why scoring stays
+with the official harness.
 
 ## License
 
-MIT
+[MIT](LICENSE).

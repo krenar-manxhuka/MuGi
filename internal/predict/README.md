@@ -6,10 +6,8 @@ retrieval (`internal/retrievaleval`) finds the code, this asks a model to fix it
 
 ## The contract
 
-- **One well-prompted call**, not a pipeline. The bench ablation
-  ([`docs/does-multi-agent-orchestration-help.md`](../../docs/does-multi-agent-orchestration-help.md))
-  found a 4-agent loop doesn't beat a single good call for a strong model, and the
-  reviewer rubber-stamps failing code anyway.
+- **One well-prompted call**, not a pipeline — a single call straight from the
+  problem statement to a diff, no planner/reviewer loop.
 - **Diff, not files.** The model is told to emit only a `git apply`-able unified
   diff. `ExtractDiff` unwraps a ```` ```diff ```` fence or leading prose and
   `ValidateDiff` checks the shape; the harness's real `git apply` is the arbiter.
