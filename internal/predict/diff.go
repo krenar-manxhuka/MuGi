@@ -52,6 +52,12 @@ func scanDiff(s string) string {
 			inHunk = false
 			out = append(out, ln)
 		case inHunk && isHunkBodyLine(ln):
+			if ln == "" {
+				// A blank context line must carry its leading space, or `patch`
+				// rejects the whole hunk as "malformed patch". Models routinely
+				// emit it as a bare empty line; normalize it.
+				ln = " "
+			}
 			out = append(out, ln)
 		default:
 			return strings.Join(out, "\n")

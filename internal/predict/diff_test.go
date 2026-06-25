@@ -80,6 +80,28 @@ func TestExtractDiff_trailingTagOnly(t *testing.T) {
 	}
 }
 
+func TestExtractDiff_blankContextLineGetsLeadingSpace(t *testing.T) {
+	// A blank context line emitted bare-empty (no leading space) makes `patch`
+	// reject the hunk as "malformed patch" — it must be normalized to " ".
+	got, err := ExtractDiff("--- a/x.py\n+++ b/x.py\n@@ -1,4 +1,4 @@\n a\n\n-b\n+c")
+	if err != nil {
+		t.Fatalf("ExtractDiff: %v", err)
+	}
+	inHunk := false
+	for _, ln := range strings.Split(strings.TrimRight(got, "\n"), "\n") {
+		if strings.HasPrefix(ln, "@@") {
+			inHunk = true
+			continue
+		}
+		if inHunk && ln == "" {
+			t.Errorf("bare empty hunk line not normalized:\n%q", got)
+		}
+	}
+	if !strings.Contains(got, "\n \n") {
+		t.Errorf("expected a space-only context line in:\n%q", got)
+	}
+}
+
 func TestExtractDiff_keepsMultiFilePatch(t *testing.T) {
 	// A legitimate two-file patch (consecutive headers, no prose) must survive.
 	two := "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n" +
