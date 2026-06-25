@@ -3,18 +3,26 @@
 // base commit, retrieves the most relevant code, asks the model for a single
 // unified diff, and writes a `{instance_id, model_name_or_path, model_patch}` row.
 //
+// -context selects what code the model sees, which is the ablation that splits
+// retrieval quality from generation quality:
+//
+//	retrieval  the top-k chunks retrieval surfaces for the problem (the real system)
+//	none       nothing — the model must infer the fix from the report (lower bound)
+//	oracle     exactly the gold patch's changed files (upper bound; isolates the model)
+//
 // The model is chosen by LLM_PROVIDER (default: mock — no spend). Only an explicit
 // real provider costs tokens:
 //
 //	# offline dry run — mock model, $0 (proves the pipeline):
-//	go run ./cmd/swebench-predict -instances slice.jsonl -mode lexical -k 10
+//	go run ./cmd/swebench-predict -instances slice.jsonl -context retrieval -k 20
 //
 //	# real run — this SPENDS on the chosen API:
 //	LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=... \
-//	  go run ./cmd/swebench-predict -instances slice.jsonl -mode lexical -k 10
+//	  go run ./cmd/swebench-predict -instances slice.jsonl -context oracle -k 20
 //
-// It clones public repositories; run it inside CI or a sandbox, not on a personal
-// machine. The slice file is a SWE-bench dataset export (JSONL or JSON array).
+// It clones public repositories (except -context none); run it inside CI or a
+// sandbox, not on a personal machine. The slice file is a SWE-bench dataset
+// export (JSONL or JSON array).
 package main
 
 import (
@@ -35,8 +43,9 @@ import (
 
 func main() {
 	instances := flag.String("instances", "", "path to a SWE-bench slice (JSONL or JSON array) (required)")
-	mode := flag.String("mode", "lexical", "retrieval mode: lexical | semantic | hybrid")
-	k := flag.Int("k", 10, "number of chunks to retrieve into the prompt")
+	contextMode := flag.String("context", "retrieval", "context shown to the model: retrieval | none | oracle")
+	mode := flag.String("mode", "lexical", "retrieval mode (when -context retrieval): lexical | semantic | hybrid")
+	k := flag.Int("k", 10, "number of chunks to put in the prompt")
 	window := flag.Int("window", 50, "chunk size in lines")
 	overlap := flag.Int("overlap", 10, "overlap between chunks in lines")
 	limit := flag.Int("limit", 0, "predict for at most this many instances (0 = all)")
@@ -51,6 +60,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "swebench-predict: -instances is required")
 		flag.Usage()
 		os.Exit(2)
+	}
+	switch *contextMode {
+	case "retrieval", "none", "oracle":
+	default:
+		fail("unknown -context %q (want retrieval | none | oracle)", *contextMode)
 	}
 
 	provider, err := llm.NewFromEnv()
@@ -69,16 +83,20 @@ func main() {
 		fail("no instances to predict for")
 	}
 
-	// Build the retrieval index builder; only semantic/hybrid need an embedder.
-	var emb index.Embedder
-	if *mode == "semantic" || *mode == "hybrid" {
-		e := embedenv.FromEnv(os.Stderr)
-		defer e.Save()
-		emb = e
-	}
-	build, err := retrievaleval.ModeBuilder(*mode, emb)
-	if err != nil {
-		fail("%v", err)
+	// Only the retrieval context builds an index; none/oracle select context
+	// directly and need neither an index nor an embedder.
+	var build retrievaleval.IndexBuilder
+	if *contextMode == "retrieval" {
+		var emb index.Embedder
+		if *mode == "semantic" || *mode == "hybrid" {
+			e := embedenv.FromEnv(os.Stderr)
+			defer e.Save()
+			emb = e
+		}
+		build, err = retrievaleval.ModeBuilder(*mode, emb)
+		if err != nil {
+			fail("%v", err)
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -95,8 +113,8 @@ func main() {
 	if provider.Name() != "mock" {
 		spend = "THIS WILL CALL A PAID API"
 	}
-	fmt.Fprintf(os.Stderr, "predicting for %d instances · model=%s (%s) · mode=%s · k=%d\n\n",
-		len(insts), provider.Name(), spend, *mode, *k)
+	fmt.Fprintf(os.Stderr, "predicting for %d instances · model=%s (%s) · context=%s · mode=%s · k=%d\n\n",
+		len(insts), provider.Name(), spend, *contextMode, *mode, *k)
 
 	preds := make([]predict.Prediction, 0, len(insts))
 	var valid, plausible, errored int
@@ -107,11 +125,11 @@ func main() {
 		}
 		task := predict.Task{ID: in.InstanceID, Repo: in.Repo, ProblemStatement: in.ProblemStatement}
 
-		chunks, rerr := retrieve(ctx, src, in, cfg, build, *k)
+		chunks, rerr := contextChunks(ctx, *contextMode, src, in, cfg, build, *k)
 		if rerr != nil {
 			errored++
 			preds = append(preds, predict.Prediction{InstanceID: in.InstanceID, Model: provider.Name()})
-			fmt.Fprintf(os.Stderr, "  %-30s retrieval failed: %v\n", in.InstanceID, rerr)
+			fmt.Fprintf(os.Stderr, "  %-30s context failed: %v\n", in.InstanceID, rerr)
 			continue
 		}
 
@@ -138,14 +156,28 @@ func main() {
 		len(preds), valid, plausible, errored, *out)
 }
 
-// retrieve checks out an instance's repo and returns the top-k chunks, always
-// releasing the checkout.
-func retrieve(ctx context.Context, src retrievaleval.RepoSource, in swebench.Instance, cfg retrievaleval.Config, build retrievaleval.IndexBuilder, k int) ([]index.Chunk, error) {
+// contextChunks selects the code the model will see for one instance, by mode:
+//
+//   - none:      nothing — the model must infer the fix from the report alone
+//     (the lower-bound baseline; no checkout, no network).
+//   - oracle:    chunks from exactly the gold patch's changed files (the upper
+//     bound that isolates generation quality from retrieval quality).
+//   - retrieval: the top-k chunks retrieval surfaces for the problem statement.
+//
+// It always releases the checkout it takes.
+func contextChunks(ctx context.Context, mode string, src retrievaleval.RepoSource, in swebench.Instance, cfg retrievaleval.Config, build retrievaleval.IndexBuilder, k int) ([]index.Chunk, error) {
+	if mode == "none" {
+		return nil, nil
+	}
 	dir, cleanup, err := src.Checkout(ctx, in.Repo, in.BaseCommit)
 	if err != nil {
 		return nil, fmt.Errorf("checkout: %w", err)
 	}
 	defer cleanup()
+
+	if mode == "oracle" {
+		return retrievaleval.OracleChunks(dir, index.ChangedFiles(in.Patch), cfg, k)
+	}
 	return retrievaleval.RetrieveFrom(ctx, dir, in.ProblemStatement, cfg, build, k)
 }
 

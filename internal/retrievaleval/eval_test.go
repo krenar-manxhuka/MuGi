@@ -210,6 +210,41 @@ func TestRetrieveFrom_returnsRankedChunks(t *testing.T) {
 	}
 }
 
+func TestOracleChunks_onlyTheNamedFiles(t *testing.T) {
+	dir := writeFixtureRepo(t)
+
+	got, err := OracleChunks(dir, []string{"calc.py"}, Config{}, 5)
+	if err != nil {
+		t.Fatalf("OracleChunks: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("expected chunks from calc.py")
+	}
+	for _, c := range got {
+		if c.Path != "calc.py" {
+			t.Errorf("oracle returned a chunk from %s, want only calc.py", c.Path)
+		}
+	}
+
+	// A file the gold patch names but that isn't present yields nothing.
+	none, err := OracleChunks(dir, []string{"does/not/exist.py"}, Config{}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(none) != 0 {
+		t.Errorf("expected no chunks for an absent file, got %d", len(none))
+	}
+
+	// k caps the number of chunks returned.
+	capped, err := OracleChunks(dir, []string{"calc.py"}, Config{Window: 1, Overlap: 0}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(capped) != 1 {
+		t.Errorf("k=1 should cap to 1 chunk, got %d", len(capped))
+	}
+}
+
 func TestModeBuilder_validation(t *testing.T) {
 	if _, err := ModeBuilder("lexical", nil); err != nil {
 		t.Errorf("lexical needs no embedder: %v", err)

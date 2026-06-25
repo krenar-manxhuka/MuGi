@@ -214,6 +214,35 @@ func RetrieveFrom(ctx context.Context, dir, query string, cfg Config, build Inde
 	return hits, nil
 }
 
+// OracleChunks returns chunks drawn only from the given files — the changed files
+// of an instance's gold patch — capped to k. It is the retrieval upper bound for
+// the ablation: the model is shown exactly the files the fix touches (their actual
+// contents), without ever being shown the fix itself, so any failure from here on
+// is the generator's, not retrieval's. files come from index.ChangedFiles(patch);
+// dir is only read.
+func OracleChunks(dir string, files []string, cfg Config, k int) ([]index.Chunk, error) {
+	cfg = cfg.withDefaults()
+	chunks, err := chunkRepo(dir, cfg)
+	if err != nil {
+		return nil, err
+	}
+	want := make(map[string]bool, len(files))
+	for _, f := range files {
+		want[f] = true
+	}
+	out := make([]index.Chunk, 0, k)
+	for _, c := range chunks {
+		if !want[c.Path] {
+			continue
+		}
+		out = append(out, c)
+		if k > 0 && len(out) >= k {
+			break
+		}
+	}
+	return out, nil
+}
+
 // Run evaluates every task over the given source: for each it checks out the
 // repo, runs EvaluateTask, and releases the checkout. A checkout or eval failure
 // is recorded per (mode, k) row rather than aborting the run, so one bad repo

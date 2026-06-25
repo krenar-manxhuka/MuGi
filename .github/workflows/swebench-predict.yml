@@ -32,9 +32,13 @@ on:
         required: false
         default: "20"
       mode:
-        description: "Retrieval mode (lexical needs no embedder)."
+        description: "Retrieval mode when context=retrieval (lexical needs no embedder)."
         required: false
         default: "lexical"
+      context:
+        description: "Context shown to the model: retrieval | none | oracle (run all three for the ablation)."
+        required: false
+        default: "retrieval"
 
 permissions:
   contents: read
@@ -106,6 +110,7 @@ jobs:
           fi
           go run ./cmd/swebench-predict \
             -instances slice.jsonl \
+            -context "${{ inputs.context }}" \
             -mode "${{ inputs.mode }}" \
             -k "${{ inputs.k }}" \
             -out predictions.jsonl
@@ -113,7 +118,7 @@ jobs:
       - name: Upload predictions + slice
         uses: actions/upload-artifact@v4
         with:
-          name: swebench-predictions
+          name: swebench-predictions-${{ inputs.context }}
           path: |
             predictions.jsonl
             slice.jsonl
@@ -147,7 +152,7 @@ jobs:
       - name: Download predictions
         uses: actions/download-artifact@v4
         with:
-          name: swebench-predictions
+          name: swebench-predictions-${{ inputs.context }}
 
       - name: Derive the instance ids to score
         id: ids
@@ -176,6 +181,8 @@ jobs:
 
       - name: Report % resolved
         if: always()
+        env:
+          CONTEXT: ${{ inputs.context }}
         run: |
           python - <<'PY'
           import glob, json, os, sys
@@ -187,7 +194,7 @@ jobs:
           resolved = rep.get("resolved_instances", 0)
           completed = rep.get("completed_instances", 0)
           total = rep.get("total_instances", completed)
-          line = f"MuGi resolved {resolved}/{total} (completed {completed})."
+          line = f"MuGi [context={os.environ.get('CONTEXT','?')}] resolved {resolved}/{total} (completed {completed})."
           print(line)
           summary = os.environ.get("GITHUB_STEP_SUMMARY")
           if summary:
@@ -199,7 +206,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: swebench-predict-report
+          name: swebench-predict-report-${{ inputs.context }}
           path: |
             *.json
             logs/**
