@@ -47,6 +47,52 @@ func TestExtractDiff(t *testing.T) {
 	}
 }
 
+// The model (esp. Haiku) emits a diff, then a </diff> tag, prose, and a second
+// diff. These are the real failure shapes from the first SWE-bench run: the patch
+// must be cut at the first non-diff line or git apply rejects the whole thing.
+func TestExtractDiff_stopsAtTagsAndProse(t *testing.T) {
+	firstHunk := "--- a/x.py\n+++ b/x.py\n@@ -1,2 +1,2 @@\n a\n-b\n+c"
+	contaminated := firstHunk + "\n</diff>\n\nWait, let me reconsider. Actually:\n\n" +
+		"<diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1,2 +1,2 @@\n a\n-b\n+WRONG\n</diff>"
+
+	got, err := ExtractDiff(contaminated)
+	if err != nil {
+		t.Fatalf("ExtractDiff: %v", err)
+	}
+	for _, bad := range []string{"</diff>", "Wait", "reconsider", "+WRONG"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("extracted diff still contains %q:\n%s", bad, got)
+		}
+	}
+	if !strings.Contains(got, "+c") {
+		t.Errorf("extracted diff lost the real change (+c):\n%s", got)
+	}
+}
+
+func TestExtractDiff_trailingTagOnly(t *testing.T) {
+	// The shape that *happened* to apply on two instances — strip the tag anyway.
+	got, err := ExtractDiff("--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n</diff>")
+	if err != nil {
+		t.Fatalf("ExtractDiff: %v", err)
+	}
+	if strings.Contains(got, "</diff>") {
+		t.Errorf("trailing tag not stripped:\n%s", got)
+	}
+}
+
+func TestExtractDiff_keepsMultiFilePatch(t *testing.T) {
+	// A legitimate two-file patch (consecutive headers, no prose) must survive.
+	two := "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n" +
+		"diff --git a/y.py b/y.py\n--- a/y.py\n+++ b/y.py\n@@ -1 +1 @@\n-c\n+d"
+	got, err := ExtractDiff(two)
+	if err != nil {
+		t.Fatalf("ExtractDiff: %v", err)
+	}
+	if !strings.Contains(got, "+b") || !strings.Contains(got, "+d") {
+		t.Errorf("multi-file patch was truncated:\n%s", got)
+	}
+}
+
 func TestValidateDiff(t *testing.T) {
 	if err := ValidateDiff("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b"); err != nil {
 		t.Errorf("a well-formed diff should validate: %v", err)

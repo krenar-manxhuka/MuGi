@@ -6,17 +6,21 @@ import (
 )
 
 // ExtractDiff pulls a unified diff out of a model reply and sanity-checks it.
-// Models wrap diffs inconsistently — raw, inside a ```diff fence, or after a line
-// of prose — so this unwraps a fenced block when present, drops anything before
-// the first diff header, and validates the result has the shape git apply needs.
-// It is a guard, not a full parser: the official harness's `git apply` is the
-// real arbiter of whether a patch applies.
+// Models wrap diffs inconsistently — raw, inside a ```diff fence, behind a line of
+// prose, or (especially smaller models) as a diff followed by a `</diff>` tag,
+// some "wait, let me reconsider…" commentary, and a *second* diff. So this unwraps
+// a fenced block, drops anything before the first diff header, and then keeps only
+// the first well-formed diff, cutting at the first line that can't belong to it —
+// because a trailing `</diff>` or prose line makes `git apply` reject the whole
+// patch. It is a guard, not a full parser: the harness's `git apply` is the real
+// arbiter of whether a patch applies.
 func ExtractDiff(raw string) (string, error) {
 	s := strings.ReplaceAll(raw, "\r\n", "\n")
 	if inner, ok := fencedBlock(s); ok {
 		s = inner
 	}
 	s = sliceFromDiffStart(s)
+	s = scanDiff(s)
 	s = strings.TrimRight(s, " \t\n")
 	if strings.TrimSpace(s) == "" {
 		return "", fmt.Errorf("no diff found in model output")
@@ -26,6 +30,68 @@ func ExtractDiff(raw string) (string, error) {
 	}
 	// git apply is happiest with a trailing newline.
 	return s + "\n", nil
+}
+
+// scanDiff keeps only the leading well-formed unified diff, stopping at the first
+// line that cannot be part of one. The input must already start at a diff header
+// (see sliceFromDiffStart). Header lines and `@@` hunks are kept; once inside a
+// hunk, only context/added/removed/"\ No newline" lines (and blank lines a model
+// forgot to prefix) belong — anything else (a `</diff>` tag, a prose sentence, a
+// `<diff` re-opener) ends the diff. Consecutive `diff --git`/`---` headers with no
+// prose between them keep multi-file patches intact.
+func scanDiff(s string) string {
+	lines := strings.Split(s, "\n")
+	out := make([]string, 0, len(lines))
+	inHunk := false
+	for _, ln := range lines {
+		switch {
+		case strings.HasPrefix(ln, "@@"):
+			inHunk = true
+			out = append(out, ln)
+		case isDiffHeaderLine(ln):
+			inHunk = false
+			out = append(out, ln)
+		case inHunk && isHunkBodyLine(ln):
+			out = append(out, ln)
+		default:
+			return strings.Join(out, "\n")
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// diffHeaderPrefixes are the line starts of a git/unified diff's file-header
+// section (the lines before each `@@` hunk).
+var diffHeaderPrefixes = []string{
+	"diff --git ", "index ", "--- ", "+++ ",
+	"new file mode", "deleted file mode", "old mode ", "new mode ",
+	"rename from ", "rename to ", "copy from ", "copy to ",
+	"similarity index ", "dissimilarity index ",
+	"Binary files ", "GIT binary patch",
+}
+
+func isDiffHeaderLine(ln string) bool {
+	for _, p := range diffHeaderPrefixes {
+		if strings.HasPrefix(ln, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// isHunkBodyLine reports whether ln can appear inside a hunk: a context (' '),
+// added ('+'), removed ('-'), or "\ No newline at end of file" ('\\') line. An
+// empty line is allowed too — models often emit a blank context line without the
+// leading space.
+func isHunkBodyLine(ln string) bool {
+	if ln == "" {
+		return true
+	}
+	switch ln[0] {
+	case ' ', '+', '-', '\\':
+		return true
+	}
+	return false
 }
 
 // ValidateDiff reports whether diff has the minimal shape of a unified diff: file
