@@ -63,10 +63,21 @@ LLM_PROVIDER=anthropic LLM_MODEL=claude-haiku-4-5 ANTHROPIC_API_KEY=... \
   go run ./cmd/swebench-predict -instances slice.jsonl -context retrieval -k 20
 ```
 
-`slice.jsonl` is a SWE-bench dataset export. The full predict→score flow runs on CI
-via [`.github/workflows/swebench-predict.yml`](.github/workflows/swebench-predict.yml)
-(a predict job holding the API key, and a separate scoring job that runs the
-official harness in Docker with no key).
+`slice.jsonl` is a SWE-bench dataset export.
+
+## Workflows
+
+| workflow | trigger | cost | secret |
+|---|---|---|---|
+| [`ci.yml`](.github/workflows/ci.yml) | every push / PR | $0 | none |
+| [`swebench.yml`](.github/workflows/swebench.yml) | manual | $0 | none — validates the rig on gold patches |
+| [`swebench-recall.yml`](.github/workflows/swebench-recall.yml) | manual | $0 | none — recall@k on a slice |
+| [`swebench-predict.yml`](.github/workflows/swebench-predict.yml) | manual | API spend | `ANTHROPIC_API_KEY` |
+
+Only `swebench-predict.yml` touches a secret, and safely: it's manual-only (needs
+repo write access to trigger), the key lives in GitHub Secrets and never in the
+repo, and the job that holds it never runs the repositories' tests — a separate,
+keyless job does that in Docker.
 
 ## Layout
 
