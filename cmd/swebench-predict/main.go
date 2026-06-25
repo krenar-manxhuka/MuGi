@@ -7,6 +7,8 @@
 // retrieval quality from generation quality:
 //
 //	retrieval  the top-k chunks retrieval surfaces for the problem (the real system)
+//	file       all chunks of the top-ranked file(s) — retrieval picks the file, the
+//	           model sees it whole (closes the gap that scattered chunks open up)
 //	none       nothing — the model must infer the fix from the report (lower bound)
 //	oracle     exactly the gold patch's changed files (upper bound; isolates the model)
 //
@@ -43,9 +45,10 @@ import (
 
 func main() {
 	instances := flag.String("instances", "", "path to a SWE-bench slice (JSONL or JSON array) (required)")
-	contextMode := flag.String("context", "retrieval", "context shown to the model: retrieval | none | oracle")
-	mode := flag.String("mode", "lexical", "retrieval mode (when -context retrieval): lexical | semantic | hybrid")
+	contextMode := flag.String("context", "retrieval", "context shown to the model: retrieval | file | none | oracle")
+	mode := flag.String("mode", "lexical", "retrieval mode (when -context retrieval|file): lexical | semantic | hybrid")
 	k := flag.Int("k", 10, "number of chunks to put in the prompt")
+	topFiles := flag.Int("top-files", 1, "when -context file: how many top-ranked files to feed whole")
 	window := flag.Int("window", 50, "chunk size in lines")
 	overlap := flag.Int("overlap", 10, "overlap between chunks in lines")
 	limit := flag.Int("limit", 0, "predict for at most this many instances (0 = all)")
@@ -62,9 +65,9 @@ func main() {
 		os.Exit(2)
 	}
 	switch *contextMode {
-	case "retrieval", "none", "oracle":
+	case "retrieval", "file", "none", "oracle":
 	default:
-		fail("unknown -context %q (want retrieval | none | oracle)", *contextMode)
+		fail("unknown -context %q (want retrieval | file | none | oracle)", *contextMode)
 	}
 
 	provider, err := llm.NewFromEnv()
@@ -83,10 +86,10 @@ func main() {
 		fail("no instances to predict for")
 	}
 
-	// Only the retrieval context builds an index; none/oracle select context
-	// directly and need neither an index nor an embedder.
+	// retrieval and file rank with an index; none/oracle select context directly
+	// and need neither an index nor an embedder.
 	var build retrievaleval.IndexBuilder
-	if *contextMode == "retrieval" {
+	if *contextMode == "retrieval" || *contextMode == "file" {
 		var emb index.Embedder
 		if *mode == "semantic" || *mode == "hybrid" {
 			e := embedenv.FromEnv(os.Stderr)
@@ -125,7 +128,7 @@ func main() {
 		}
 		task := predict.Task{ID: in.InstanceID, Repo: in.Repo, ProblemStatement: in.ProblemStatement}
 
-		chunks, rerr := contextChunks(ctx, *contextMode, src, in, cfg, build, *k)
+		chunks, rerr := contextChunks(ctx, *contextMode, src, in, cfg, build, *k, *topFiles)
 		if rerr != nil {
 			errored++
 			preds = append(preds, predict.Prediction{InstanceID: in.InstanceID, Model: provider.Name()})
@@ -163,9 +166,11 @@ func main() {
 //   - oracle:    chunks from exactly the gold patch's changed files (the upper
 //     bound that isolates generation quality from retrieval quality).
 //   - retrieval: the top-k chunks retrieval surfaces for the problem statement.
+//   - file:      all chunks of the top-ranked file(s) — retrieval picks the file,
+//     but the model sees it whole instead of as scattered fragments.
 //
 // It always releases the checkout it takes.
-func contextChunks(ctx context.Context, mode string, src retrievaleval.RepoSource, in swebench.Instance, cfg retrievaleval.Config, build retrievaleval.IndexBuilder, k int) ([]index.Chunk, error) {
+func contextChunks(ctx context.Context, mode string, src retrievaleval.RepoSource, in swebench.Instance, cfg retrievaleval.Config, build retrievaleval.IndexBuilder, k, topFiles int) ([]index.Chunk, error) {
 	if mode == "none" {
 		return nil, nil
 	}
@@ -175,10 +180,14 @@ func contextChunks(ctx context.Context, mode string, src retrievaleval.RepoSourc
 	}
 	defer cleanup()
 
-	if mode == "oracle" {
+	switch mode {
+	case "oracle":
 		return retrievaleval.OracleChunks(dir, index.ChangedFiles(in.Patch), cfg, k)
+	case "file":
+		return retrievaleval.TopFileChunks(ctx, dir, in.ProblemStatement, cfg, build, topFiles, k)
+	default:
+		return retrievaleval.RetrieveFrom(ctx, dir, in.ProblemStatement, cfg, build, k)
 	}
-	return retrievaleval.RetrieveFrom(ctx, dir, in.ProblemStatement, cfg, build, k)
 }
 
 func fail(format string, args ...any) {

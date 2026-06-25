@@ -36,7 +36,7 @@ on:
         required: false
         default: "lexical"
       context:
-        description: "Context shown to the model: retrieval | none | oracle (run all three for the ablation)."
+        description: "Context shown to the model: retrieval | file | none | oracle (run all for the ablation)."
         required: false
         default: "retrieval"
 

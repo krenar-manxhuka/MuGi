@@ -146,6 +146,18 @@ score the `FAIL_TO_PASS` / `PASS_TO_PASS` contract.
 
 See [`internal/swebench/README.md`](internal/swebench/README.md) for the design.
 
+### Retrieval-augmented agent + ablation
+
+MuGi can also generate its own predictions: retrieve the relevant code, ask a
+model for a unified diff, and score it with the official harness
+([`internal/retrievaleval`](internal/retrievaleval), [`internal/predict`](internal/predict),
+`cmd/swebench-recall`, `cmd/swebench-predict`). On a small astropy slice the
+surprising finding was that **retrieval found the gold file every time (recall@20 =
+5/5) yet the agent resolved 0/5 — while feeding the model the same file *whole*
+resolved 2/5.** Finding the code wasn't the bottleneck; presenting it was.
+
+> **Fuller write-up:** [Recall was perfect. Resolution was zero. A SWE-bench retrieval ablation.](docs/does-retrieval-resolve-swebench.md)
+
 ---
 
 ## Quickstart (no API key required)
